@@ -26,6 +26,24 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 RECORD_SIZE = 4096
 
+# Сервисы доставки пушей браузеров. Отправляем только туда, чтобы никто не мог
+# подсунуть адрес внутреннего сервера и заставить NOWA туда стучаться.
+PUSH_HOSTS = (
+    "fcm.googleapis.com",            # Chrome, Яндекс Браузер, Edge на Android
+    ".push.services.mozilla.com",    # Firefox
+    ".notify.windows.com",           # Edge на Windows
+    ".push.apple.com",               # Safari и iPhone
+)
+
+
+def is_push_endpoint(endpoint):
+    parsed = urlparse(endpoint)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and any(
+        host == allowed.lstrip(".") or (allowed.startswith(".") and host.endswith(allowed))
+        for allowed in PUSH_HOSTS
+    )
+
 
 def b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()

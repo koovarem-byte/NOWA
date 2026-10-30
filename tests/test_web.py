@@ -728,29 +728,29 @@ def test_push_on_beacon_join_and_messages(app):
     register(artem, "artem")
     register(bob, "bob")
     make_friends_via_follow(artem, bob, "artem", "bob")
-    assert subscribe_push(artem, "https://push.example/artem").status_code == 200
-    assert subscribe_push(bob, "https://push.example/bob").status_code == 200
+    assert subscribe_push(artem, "https://fcm.googleapis.com/fcm/send/artem").status_code == 200
+    assert subscribe_push(bob, "https://fcm.googleapis.com/fcm/send/bob").status_code == 200
     # Без CSRF подписаться нельзя
     assert bob.post("/push/subscribe", json={}).status_code == 400
 
     light_beacon(artem, title="кофе")
     assert [(e, m["title"]) for e, m in app.sent_pushes] == [
-        ("https://push.example/bob", "🔆 artem зажёг маяк")]
+        ("https://fcm.googleapis.com/fcm/send/bob", "🔆 artem зажёг маяк")]
     app.sent_pushes.clear()
 
     token = beacon_token(app)
     post(bob, f"/b/{token}/join")
-    assert app.sent_pushes[0][0] == "https://push.example/artem"
+    assert app.sent_pushes[0][0] == "https://fcm.googleapis.com/fcm/send/artem"
     assert "bob в деле" in app.sent_pushes[0][1]["title"]
     assert app.sent_pushes[0][1]["url"] == f"/b/{token}"
     app.sent_pushes.clear()
 
     post(bob, f"/b/{token}/chat", text="бегу")
-    assert [e for e, _ in app.sent_pushes] == ["https://push.example/artem"]
+    assert [e for e, _ in app.sent_pushes] == ["https://fcm.googleapis.com/fcm/send/artem"]
     app.sent_pushes.clear()
 
     post(artem, "/messages/bob", text="привет")
-    assert app.sent_pushes == [("https://push.example/bob", {
+    assert app.sent_pushes == [("https://fcm.googleapis.com/fcm/send/bob", {
         "title": "✉️ artem", "body": "привет", "url": "/messages/artem", "tag": "dm-1"})]
 
 
@@ -758,7 +758,7 @@ def test_dead_push_subscription_is_removed(app):
     artem, bob = app.test_client(), app.test_client()
     register(artem, "artem")
     register(bob, "bob")
-    subscribe_push(bob, "https://push.example/dead")
+    subscribe_push(bob, "https://fcm.googleapis.com/fcm/send/dead")
     post(artem, "/messages/bob", text="привет")
     from app import PushSubscription
     with app.app_context():
@@ -768,8 +768,8 @@ def test_dead_push_subscription_is_removed(app):
 def test_push_unsubscribe(app):
     bob = app.test_client()
     register(bob, "bob")
-    subscribe_push(bob, "https://push.example/bob")
-    bob.post("/push/unsubscribe", json={"endpoint": "https://push.example/bob"},
+    subscribe_push(bob, "https://fcm.googleapis.com/fcm/send/bob")
+    bob.post("/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/bob"},
              headers={"X-CSRF-Token": csrf_of(bob)})
     from app import PushSubscription
     with app.app_context():
@@ -839,3 +839,18 @@ def test_webpush_rfc8291_vector():
         "cInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLV"
         "WGNWQexSgSxsj_Qulcy4a-fN"
     )
+
+
+def test_push_endpoint_must_be_real_push_service(app):
+    import webpush
+    assert webpush.is_push_endpoint("https://fcm.googleapis.com/fcm/send/x")
+    assert webpush.is_push_endpoint("https://web.push.apple.com/abc")
+    assert webpush.is_push_endpoint("https://updates.push.services.mozilla.com/wpush/v2/x")
+    assert not webpush.is_push_endpoint("http://fcm.googleapis.com/x")
+    assert not webpush.is_push_endpoint("https://evil.com/fcm.googleapis.com")
+    assert not webpush.is_push_endpoint("https://fcm.googleapis.com.evil.com/x")
+    assert not webpush.is_push_endpoint("https://169.254.169.254/latest")
+
+    client = app.test_client()
+    register(client, "artem")
+    assert subscribe_push(client, "https://127.0.0.1:8443/admin").status_code == 400

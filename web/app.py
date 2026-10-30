@@ -1217,7 +1217,7 @@ def register_routes(app):
         data = request.get_json(silent=True) or {}
         endpoint = data.get("endpoint", "")
         keys = data.get("keys") or {}
-        if not endpoint.startswith("https://") or not keys.get("p256dh") or not keys.get("auth"):
+        if not webpush.is_push_endpoint(endpoint) or not keys.get("p256dh") or not keys.get("auth"):
             abort(400, "Неверная подписка.")
         sub = PushSubscription.query.filter_by(endpoint=endpoint).first()
         if sub is None:
