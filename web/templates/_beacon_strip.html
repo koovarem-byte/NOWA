@@ -1,0 +1,28 @@
+{% from "_macros.html" import avatar with context %}
+<section class="now-strip" aria-label="Сейчас">
+    <div class="now-head">
+        <h3>🔆 Сейчас</h3>
+        <span class="muted">кто свободен и зовёт</span>
+    </div>
+    <div class="now-row">
+        <a class="beacon-card new" href="{{ url_for('new_beacon') }}">
+            <span class="beacon-emoji">＋</span>
+            <b>Зажечь маяк</b>
+            <span class="muted">Я свободен — кто со мной?</span>
+        </a>
+        {% for beacon in beacons %}
+            <a class="beacon-card {% if beacon.author_id == me.id %}mine{% elif beacon.has_member(me) %}joined{% endif %}"
+               href="{{ url_for('beacon_page', token=beacon.token) }}">
+                <span class="beacon-emoji">{{ beacon.emoji }}</span>
+                <b>{{ beacon.label }}</b>
+                <span class="beacon-who">{{ avatar(beacon.author, 'small') }} {{ beacon.author.username }}</span>
+                <span class="muted">
+                    {% if beacon.started %}сейчас{% else %}в <time class="local" data-format="time" datetime="{{ beacon.starts_at|iso }}">{{ beacon.starts_at.strftime('%H:%M') }}</time>{% endif %}
+                    · {{ beacon.members|length }} идут
+                </span>
+                {% if beacon.author_id == me.id %}<span class="beacon-state">твой маяк</span>
+                {% elif beacon.has_member(me) %}<span class="beacon-state">ты идёшь ✓</span>{% endif %}
+            </a>
+        {% endfor %}
+    </div>
+</section>

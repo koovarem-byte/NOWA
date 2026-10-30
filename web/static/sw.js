@@ -1,6 +1,10 @@
-// Service worker NOWA: кэширует оформление, чтобы приложение открывалось быстро
-// даже на плохом интернете, и показывает страницу «нет сети», если связи нет совсем.
-const CACHE = "nowa-v3";
+// Service worker NOWA.
+// 1. Оформление берём из кэша — приложение открывается быстро даже на плохом интернете.
+// 2. Открытые страницы сохраняем — без сети их можно перечитать.
+// 3. Если страницы нет в кэше и сети нет — показываем «нет сети».
+const CACHE = "nowa-v5";
+const PAGES = "nowa-pages-v1";
+const MAX_PAGES = 40;
 const SHELL = ["/static/style.css", "/static/app.js", "/static/icon.svg", "/offline"];
 
 self.addEventListener("install", (event) => {
@@ -11,11 +15,21 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
     event.waitUntil(
         caches.keys().then((keys) =>
-            Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))
+            Promise.all(keys.filter((key) => key !== CACHE && key !== PAGES).map((key) => caches.delete(key)))
         )
     );
     self.clients.claim();
 });
+
+const rememberPage = async (request, response) => {
+    const cache = await caches.open(PAGES);
+    await cache.put(request, response);
+    const keys = await cache.keys();
+    // Храним только последние страницы, чтобы не забивать память телефона
+    for (const old of keys.slice(0, Math.max(0, keys.length - MAX_PAGES))) {
+        await cache.delete(old);
+    }
+};
 
 self.addEventListener("fetch", (event) => {
     const request = event.request;
@@ -23,7 +37,6 @@ self.addEventListener("fetch", (event) => {
     const url = new URL(request.url);
     if (url.origin !== location.origin) return;
 
-    // Статику отдаём из кэша и обновляем в фоне
     if (url.pathname.startsWith("/static/")) {
         event.respondWith(
             caches.match(request).then((cached) => {
@@ -38,8 +51,17 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    // Страницы — всегда из сети, а без сети показываем заглушку
     if (request.mode === "navigate") {
-        event.respondWith(fetch(request).catch(() => caches.match("/offline")));
+        event.respondWith(
+            fetch(request)
+                .then((response) => {
+                    if (response.ok && !response.redirected) {
+                        const copy = response.clone();
+                        event.waitUntil(rememberPage(request, copy));
+                    }
+                    return response;
+                })
+                .catch(async () => (await caches.match(request, { cacheName: PAGES })) || caches.match("/offline"))
+        );
     }
 });

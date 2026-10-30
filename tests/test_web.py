@@ -408,3 +408,214 @@ def test_old_database_is_upgraded(tmp_path):
         from app import Post
         assert str(db.session.get(Post, 1).published_at) == "2026-01-01 10:00:00"
         db.engine.dispose()
+
+
+# ---------------- Маяки ----------------
+
+def make_friends_via_follow(a, b, a_name, b_name):
+    post(a, f"/u/{b_name}/follow")
+    post(b, f"/u/{a_name}/follow")
+
+
+def light_beacon(client, **data):
+    form = {"activity": "coffee", "when": "now", "hours": "3", "audience": "friends", **data}
+    return post(client, "/beacons/new", **form)
+
+
+def beacon_token(app):
+    from app import Beacon
+    with app.app_context():
+        return Beacon.query.order_by(Beacon.id.desc()).first().token
+
+
+def test_beacon_visible_to_mutual_friends_only(app):
+    artem, bob, eve = app.test_client(), app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    register(eve, "eve")
+    make_friends_via_follow(artem, bob, "artem", "bob")
+    post(eve, "/u/artem/follow")  # eve подписана, но не взаимно
+
+    page = light_beacon(artem, title="кофе после пар", place="у главного входа").get_data(as_text=True)
+    assert "кофе после пар" in page and "у главного входа" in page
+
+    assert "кофе после пар" in bob.get("/feed").get_data(as_text=True)
+    assert "кофе после пар" not in eve.get("/feed").get_data(as_text=True)
+
+    # Друг получил уведомление
+    assert "зажёг маяк" in bob.get("/notifications").get_data(as_text=True)
+    assert "зажёг маяк" not in eve.get("/notifications").get_data(as_text=True)
+
+
+def test_beacon_circle_audience(app):
+    artem, bob, eve = app.test_client(), app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    register(eve, "eve")
+    make_friends_via_follow(artem, bob, "artem", "bob")
+    make_friends_via_follow(artem, eve, "artem", "eve")
+    post(artem, "/u/bob/circle")
+
+    light_beacon(artem, title="только для своих", audience="circle")
+    assert "только для своих" in bob.get("/feed").get_data(as_text=True)
+    assert "только для своих" not in eve.get("/feed").get_data(as_text=True)
+
+
+def test_join_beacon_place_and_chat(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    make_friends_via_follow(artem, bob, "artem", "bob")
+    light_beacon(artem, place="кафе на углу")
+    token = beacon_token(app)
+
+    # До присоединения место скрыто, чата нет
+    page = bob.get(f"/b/{token}").get_data(as_text=True)
+    assert "кафе на углу" not in page and "Место увидишь" in page and "Чат маяка" not in page
+    assert bob.post(f"/b/{token}/chat", data={"text": "x", "csrf": csrf_of(bob)}).status_code == 403
+
+    page = post(bob, f"/b/{token}/join").get_data(as_text=True)
+    assert "кафе на углу" in page and "Чат маяка" in page
+    assert "в деле" in artem.get("/notifications").get_data(as_text=True)
+
+    response = bob.post(f"/b/{token}/chat", data={"text": "Буду в 5", "csrf": csrf_of(bob)},
+                        headers={"Accept": "application/json"})
+    assert response.get_json()["author"] == "bob"
+    messages = artem.get(f"/api/b/{token}/chat?after=0").get_json()
+    assert [m["text"] for m in messages] == ["Буду в 5"]
+
+    # Передумал — уходит из маяка, уведомление у автора исчезает
+    post(bob, f"/b/{token}/join")
+    assert "в деле" not in artem.get("/notifications").get_data(as_text=True)
+
+
+def test_beacon_expires_with_chat(app):
+    from datetime import timedelta
+    from app import Beacon, BeaconMessage, now
+
+    artem = app.test_client()
+    register(artem, "artem")
+    light_beacon(artem)
+    token = beacon_token(app)
+    post(artem, f"/b/{token}/chat", text="привет")
+
+    with app.app_context():
+        Beacon.query.first().expires_at = now() - timedelta(minutes=1)
+        db.session.commit()
+
+    response = artem.get(f"/b/{token}")
+    assert response.status_code == 404 and "погас" in response.get_data(as_text=True)
+    artem.get("/feed")
+    with app.app_context():
+        assert Beacon.query.count() == 0 and BeaconMessage.query.count() == 0
+
+
+def test_cancel_beacon_only_by_author(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    light_beacon(artem)
+    token = beacon_token(app)
+    assert bob.post(f"/b/{token}/cancel", data={"csrf": csrf_of(bob)}).status_code == 403
+    post(artem, f"/b/{token}/cancel")
+    assert artem.get(f"/b/{token}").status_code == 404
+
+
+def test_beacon_link_brings_new_user(app):
+    """Главная вирусная петля: ссылка на маяк → регистрация → сразу в маяке и в друзьях."""
+    artem = app.test_client()
+    register(artem, "artem")
+    light_beacon(artem, title="гуляем в парке")
+    token = beacon_token(app)
+
+    guest = app.test_client()
+    page = guest.get(f"/b/{token}").get_data(as_text=True)
+    assert "гуляем в парке" in page and 'property="og:title"' in page and "Я в деле" in page
+
+    response = guest.post(f"/b/{token}/join", data={"csrf": csrf_of(guest)})
+    assert "/register" in response.location
+
+    response = register(guest, "newbie")
+    assert f"/b/{token}" in response.location
+
+    from app import Follow, User
+    with app.app_context():
+        artem_id = User.query.filter_by(username="artem").first().id
+        newbie_id = User.query.filter_by(username="newbie").first().id
+        assert db.session.get(Follow, (artem_id, newbie_id)) and db.session.get(Follow, (newbie_id, artem_id))
+
+    page = guest.get(f"/b/{token}").get_data(as_text=True)
+    assert "Чат маяка" in page
+
+
+def test_beacon_start_time_in_user_timezone(app):
+    from datetime import timedelta
+    from app import Beacon, now
+
+    client = app.test_client()
+    register(client, "artem")
+    # Москва (UTC+3): через 2 часа по местному времени
+    local = now() + timedelta(hours=3 + 2)
+    light_beacon(client, when="at", at=local.strftime("%H:%M"), tz_offset="-180")
+    with app.app_context():
+        delay = Beacon.query.first().starts_at - now()
+        assert timedelta(hours=1, minutes=58) < delay < timedelta(hours=2, minutes=1)
+
+
+# ---------------- Приглашения ----------------
+
+def test_invite_link_makes_friends(app):
+    artem = app.test_client()
+    register(artem, "artem")
+    page = artem.get("/settings").get_data(as_text=True)
+    code = re.search(r"/i/([A-Za-z0-9_-]+)", page).group(1)
+
+    guest = app.test_client()
+    assert "artem зовёт тебя" in guest.get(f"/i/{code}").get_data(as_text=True)
+    register(guest, "newbie")
+
+    assert "по твоему приглашению" in artem.get("/notifications").get_data(as_text=True)
+    assert "Пригласил(а): 1" in artem.get("/settings").get_data(as_text=True)
+    assert "1</b> подписчиков" in guest.get("/u/artem").get_data(as_text=True)
+
+
+# ---------------- Вопрос дня ----------------
+
+def test_daily_question_unlocks_friends_answers(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    post(artem, "/u/bob/follow")
+
+    post(bob, "/question", text="Ответ Боба")
+    page = artem.get("/question").get_data(as_text=True)
+    assert "Ответ Боба" not in page and "уже ответили: 1" in page
+    assert "Вопрос дня" in artem.get("/feed").get_data(as_text=True)
+
+    page = post(artem, "/question", text="Мой ответ").get_data(as_text=True)
+    assert "Ответ Боба" in page and "Мой ответ" in page and "🔥 1" in page
+    assert "question-card" not in artem.get("/feed").get_data(as_text=True)
+
+    # Второй ответ за день не принимается
+    post(artem, "/question", text="Ещё один")
+    from app import Answer
+    with app.app_context():
+        assert Answer.query.count() == 2
+
+
+def test_answer_streak(app):
+    from datetime import timedelta
+    from app import Answer, User, answer_streak, today
+
+    client = app.test_client()
+    register(client, "artem")
+    with app.app_context():
+        user = User.query.first()
+        for days_ago in (1, 2, 3, 5):
+            db.session.add(Answer(user_id=user.id, day=today() - timedelta(days=days_ago), text="x"))
+        db.session.commit()
+        # Сегодня ещё не ответил — серия не сгорела
+        assert answer_streak(user) == 3
+        db.session.add(Answer(user_id=user.id, day=today(), text="x"))
+        db.session.commit()
+        assert answer_streak(user) == 4

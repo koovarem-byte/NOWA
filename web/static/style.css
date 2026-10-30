@@ -367,3 +367,126 @@ img.avatar { object-fit: cover; background: var(--line); }
 .notification .quote { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 [hidden] { display: none !important; }
+
+/* ---------- Сейчас: маяки ---------- */
+
+.now-strip { margin-bottom: 12px; }
+.now-head { display: flex; align-items: baseline; gap: 8px; margin: 0 4px 8px; }
+.now-head h3 { margin: 0; }
+.now-row {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding-bottom: 4px;
+    margin: 0 -16px;
+    padding-left: 16px;
+    padding-right: 16px;
+    scrollbar-width: none;
+}
+.now-row::-webkit-scrollbar { display: none; }
+
+.beacon-card {
+    flex: 0 0 156px;
+    scroll-snap-align: start;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px;
+    color: var(--text);
+    position: relative;
+}
+.beacon-card b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.beacon-card .muted { font-size: 13px; }
+.beacon-card.new { border-style: dashed; border-color: var(--accent); }
+.beacon-card.new .beacon-emoji { color: var(--accent); }
+.beacon-card.mine, .beacon-card.joined {
+    border-color: #ffb020;
+    box-shadow: 0 0 0 1px #ffb020 inset, 0 0 18px -6px #ffb020;
+}
+.beacon-emoji { font-size: 28px; line-height: 1.1; }
+.beacon-who { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.beacon-state { font-size: 12px; color: #ffb020; font-weight: 600; }
+
+.beacon-hero { text-align: center; }
+.beacon-big {
+    font-size: 64px;
+    width: 112px; height: 112px;
+    margin: 4px auto 8px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 176, 32, .35), transparent 70%);
+    animation: glow 2.4s ease-in-out infinite;
+}
+@keyframes glow { 50% { transform: scale(1.06); filter: brightness(1.15); } }
+.beacon-hero h2 { margin-bottom: 8px; }
+.beacon-hero .author { justify-content: center; margin-bottom: 8px; }
+.beacon-when { color: var(--muted); margin-bottom: 8px; }
+.members { margin: 12px 0 16px; }
+.avatars { display: flex; justify-content: center; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.big-cta { font-size: 18px; padding: 14px 28px; }
+.small { font-size: 13px; margin-top: 10px; }
+
+.beacon-form h4 { margin: 16px 0 8px; }
+.beacon-form .btn.wide { width: 100%; margin-top: 18px; padding: 14px; font-size: 17px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.chip { position: relative; margin: 0; color: var(--text); font-size: 15px; cursor: pointer; }
+.chip input[type=radio] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.chip > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg);
+}
+.chip input:checked + span { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.chip input:focus-visible + span { outline: 2px solid var(--accent); }
+.inline-time { width: auto; padding: 2px 6px; margin: 0; border-radius: 6px; }
+
+.beacon-chat { height: 60vh; min-height: 360px; }
+.beacon-chat .chat-head { justify-content: space-between; }
+.bubble .who { display: block; font-size: 12px; font-weight: 600; color: var(--accent); }
+.bubble.pending { opacity: .65; }
+
+/* ---------- Вопрос дня ---------- */
+
+.question-card { display: flex; flex-direction: column; gap: 4px; color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.question-card b { font-size: 18px; }
+.question h2 { margin: 8px 0 14px; font-size: 24px; line-height: 1.25; }
+.question textarea { margin-bottom: 10px; }
+.streak { font-weight: 700; color: #ff8a00; }
+.answer p { margin-top: 6px; white-space: pre-wrap; }
+.mine-answer { background: var(--bg); border-radius: 10px; padding: 12px; }
+.invite-link { font-size: 14px; }
+
+/* ---------- Нет сети ---------- */
+
+body.offline::before {
+    content: "Нет сети — показываем сохранённое. Сообщения уйдут, когда связь вернётся.";
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: #ffb020;
+    color: #1a1200;
+    text-align: center;
+    font-size: 13px;
+    padding: 6px 12px;
+}
+
+/* ---------- Главная ---------- */
+
+.landing { padding-top: 10vh; }
+.landing .tagline { font-size: 28px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.pitch { margin-top: 48px; }
+.pitch-main { text-align: center; padding: 24px; }
+.pitch-main p { margin-bottom: 8px; }
+.pitch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pitch-grid .card { margin: 0; }
+.pitch-grid p { margin-top: 4px; }
+@media (max-width: 520px) { .pitch-grid { grid-template-columns: 1fr; } }

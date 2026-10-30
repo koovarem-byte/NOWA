@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Зажечь маяк · NOWA{% endblock %}
+{% block content %}
+<form class="card beacon-form" method="post">
+    <h2>🔆 Зажечь маяк</h2>
+    <p class="muted">Скажи своим, что ты свободен. Кто захочет — присоединится.</p>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="tz_offset" class="tz-offset">
+
+    <h4>Что делаем?</h4>
+    <div class="chips">
+        {% for key, (emoji, label) in activities.items() %}
+            <label class="chip"><input type="radio" name="activity" value="{{ key }}" {% if loop.first %}checked{% endif %}>
+                <span>{{ emoji }} {{ label }}</span></label>
+        {% endfor %}
+    </div>
+    <input name="title" maxlength="80" placeholder="Подробнее, по желанию: «кофе после пар»">
+
+    <h4>Когда?</h4>
+    <div class="chips">
+        <label class="chip"><input type="radio" name="when" value="now" checked><span>Прямо сейчас</span></label>
+        <label class="chip"><input type="radio" name="when" value="30"><span>Через 30 мин</span></label>
+        <label class="chip"><input type="radio" name="when" value="60"><span>Через час</span></label>
+        <label class="chip"><input type="radio" name="when" value="120"><span>Через 2 часа</span></label>
+        <label class="chip"><input type="radio" name="when" value="at"><span>В <input type="time" name="at" class="inline-time"></span></label>
+    </div>
+
+    <h4>Где? <span class="muted">— увидят только те, кто присоединится</span></h4>
+    <input name="place" maxlength="120" placeholder="Например: «у главного входа»">
+
+    <h4>Сколько горит?</h4>
+    <div class="chips">
+        {% for hours, label in durations.items() %}
+            <label class="chip"><input type="radio" name="hours" value="{{ hours }}" {% if hours == 3 %}checked{% endif %}><span>{{ label }}</span></label>
+        {% endfor %}
+    </div>
+
+    <h4>Кто увидит?</h4>
+    <div class="chips">
+        <label class="chip"><input type="radio" name="audience" value="friends" checked><span>👥 Взаимные друзья</span></label>
+        <label class="chip"><input type="radio" name="audience" value="circle"><span>🔒 Близкий круг</span></label>
+    </div>
+    <p class="muted small">Ещё можно отправить ссылку на маяк кому угодно — после того как зажжёшь.</p>
+
+    <button class="btn wide">🔆 Зажечь</button>
+</form>
+{% endblock %}

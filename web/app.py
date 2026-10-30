@@ -20,6 +20,7 @@ from flask import (
 from flask_sqlalchemy import SQLAlchemy
 from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from sqlalchemy import and_, inspect, or_, text
+from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -42,6 +43,60 @@ CHAT_TIMERS = {
     60 * 60 * 24: "1 день",
     60 * 60 * 24 * 7: "7 дней",
 }
+
+# Маяки: «я свободен сейчас — кто со мной?»
+BEACON_ACTIVITIES = {
+    "coffee": ("☕", "Кофе"),
+    "walk": ("🚶", "Гулять"),
+    "food": ("🍕", "Поесть"),
+    "movie": ("🎬", "Кино"),
+    "games": ("🎮", "Поиграть"),
+    "sport": ("⚽", "Спорт"),
+    "study": ("📚", "Учиться"),
+    "other": ("✨", "Своё"),
+}
+BEACON_DURATIONS = {1: "1 час", 3: "3 часа", 6: "6 часов"}
+MAX_BEACON_NOTIFY = 200
+
+# День для «Вопроса дня» считаем по Москве — там основная аудитория
+DAY_OFFSET = timedelta(hours=3)
+
+DAILY_QUESTIONS = [
+    "Что тебя сегодня порадовало?",
+    "Какую песню ты слушаешь на повторе?",
+    "Куда бы ты поехал(а) прямо сейчас, если бы можно было без денег и сборов?",
+    "Чему ты научился(ась) за последний месяц?",
+    "Какой фильм или сериал посоветуешь друзьям?",
+    "Что бы ты сделал(а), если бы завтра не надо было никуда идти?",
+    "Какая еда — твоё лучшее утешение?",
+    "Кто из друзей тебя недавно выручил?",
+    "Самое странное, что ты видел(а) на этой неделе?",
+    "Какая привычка тебе реально помогает?",
+    "О чём ты мечтаешь, но пока никому не говорил(а)?",
+    "Если бы у тебя был свой канал, о чём бы он был?",
+    "Лучший совет, который тебе давали?",
+    "Где в твоём городе лучше всего гулять?",
+    "Какой навык ты бы прокачал(а) за один день, если бы мог(ла)?",
+    "Что тебя бесит больше всего в соцсетях?",
+    "Какая книга или видео изменили твоё мнение о чём-то?",
+    "Какой момент этого года ты бы пережил(а) ещё раз?",
+    "Что ты ешь на завтрак?",
+    "С кем из известных людей ты бы сходил(а) на кофе?",
+    "Какое приложение на телефоне ты бы удалил(а) первым?",
+    "Чего ты ждёшь от этих выходных?",
+    "Какая игра — твоя любимая за всё время?",
+    "Что самое смешное случилось с тобой в школе или универе?",
+    "Если бы можно было выучить любой язык за ночь — какой?",
+    "Твоё идеальное воскресенье — какое оно?",
+    "О чём ты передумал(а) за последний год?",
+    "Чем ты гордишься, но редко рассказываешь?",
+    "Какой звук или запах напоминает тебе детство?",
+    "Что ты сделаешь сегодня, чтобы день был хорошим?",
+    "Какую суперсилу выбрал(а) бы на один день?",
+    "Какой твой любимый способ отдохнуть от телефона?",
+    "Куда ты хочешь сходить с друзьями в ближайший месяц?",
+    "Какой вопрос ты бы задал(а) всем в NOWA?",
+]
 
 PILImage.MAX_IMAGE_PIXELS = 40_000_000
 
@@ -71,7 +126,15 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     bio = db.Column(db.String(300), default="")
     avatar_id = db.Column(db.Integer, db.ForeignKey("image.id", use_alter=True, name="fk_user_avatar"))
+    invite_code = db.Column(db.String(16), unique=True)
+    invited_by_id = db.Column(db.Integer, db.ForeignKey("user.id"))
     created_at = db.Column(db.DateTime, default=now)
+
+    def get_invite_code(self):
+        if not self.invite_code:
+            self.invite_code = secrets.token_urlsafe(6)
+            db.session.commit()
+        return self.invite_code
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -150,24 +213,100 @@ class ChatTimer(db.Model):
     seconds = db.Column(db.Integer, nullable=False, default=0)
 
 
+class Beacon(db.Model):
+    """Маяк: «я свободен — кто со мной?». Гаснет в expires_at вместе со своим чатом."""
+    id = db.Column(db.Integer, primary_key=True)
+    author_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    activity = db.Column(db.String(20), nullable=False, default="other")
+    title = db.Column(db.String(80), nullable=False, default="")
+    place = db.Column(db.String(120), nullable=False, default="")
+    # "friends" — взаимные подписки, "circle" — только близкий круг
+    audience = db.Column(db.String(10), nullable=False, default="friends")
+    starts_at = db.Column(db.DateTime, nullable=False, default=now)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    # Секрет для ссылки: кто получил ссылку, тот может посмотреть маяк и присоединиться
+    token = db.Column(db.String(16), unique=True, nullable=False,
+                      default=lambda: secrets.token_urlsafe(9))
+    created_at = db.Column(db.DateTime, default=now)
+
+    author = db.relationship("User")
+    members = db.relationship(
+        "BeaconMember", cascade="all, delete-orphan", order_by="BeaconMember.joined_at"
+    )
+    messages = db.relationship(
+        "BeaconMessage", cascade="all, delete-orphan", order_by="BeaconMessage.id"
+    )
+
+    @property
+    def emoji(self):
+        return BEACON_ACTIVITIES.get(self.activity, BEACON_ACTIVITIES["other"])[0]
+
+    @property
+    def label(self):
+        if self.title:
+            return self.title
+        return BEACON_ACTIVITIES.get(self.activity, BEACON_ACTIVITIES["other"])[1]
+
+    @property
+    def started(self):
+        return self.starts_at <= now()
+
+    def has_member(self, user):
+        return user is not None and any(m.user_id == user.id for m in self.members)
+
+
+class BeaconMember(db.Model):
+    beacon_id = db.Column(db.Integer, db.ForeignKey("beacon.id"), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    joined_at = db.Column(db.DateTime, default=now)
+
+    user = db.relationship("User")
+
+
+class BeaconMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    beacon_id = db.Column(db.Integer, db.ForeignKey("beacon.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=now)
+
+    user = db.relationship("User")
+
+
+class Answer(db.Model):
+    """Ответ на «Вопрос дня». Один ответ в день."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    day = db.Column(db.Date, nullable=False, index=True)
+    text = db.Column(db.String(500), nullable=False)
+    created_at = db.Column(db.DateTime, default=now)
+
+    user = db.relationship("User")
+
+    __table_args__ = (db.UniqueConstraint("user_id", "day"),)
+
+
 class Notification(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     actor_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    # "like", "comment", "follow"
+    # "like", "comment", "follow", "beacon", "beacon_join", "invite"
     kind = db.Column(db.String(20), nullable=False)
     post_id = db.Column(db.Integer, db.ForeignKey("post.id", ondelete="CASCADE"))
+    beacon_id = db.Column(db.Integer, db.ForeignKey("beacon.id", ondelete="CASCADE"))
     created_at = db.Column(db.DateTime, default=now)
     is_read = db.Column(db.Boolean, default=False, nullable=False)
 
     actor = db.relationship("User", foreign_keys=[actor_id])
     post = db.relationship("Post", backref=db.backref("notifications", cascade="all, delete-orphan"))
+    beacon = db.relationship("Beacon", backref=db.backref("notifications", cascade="all, delete-orphan"))
 
 
 def upgrade_schema():
     """create_all не добавляет новые колонки в старые таблицы — дописываем их сами."""
     columns = {
-        "user": [("avatar_id", "INTEGER")],
+        "user": [("avatar_id", "INTEGER"), ("invite_code", "VARCHAR(16)"), ("invited_by_id", "INTEGER")],
+        "notification": [("beacon_id", "INTEGER")],
         "post": [("image_id", "INTEGER"), ("published_at", "TIMESTAMP")],
         "message": [("expires_at", "TIMESTAMP")],
     }
@@ -256,16 +395,124 @@ def save_image(file, owner, size, square=False):
     return image
 
 
-def notify(user_id, kind, post_id=None):
-    if user_id == g.user.id:
+def notify(user_id, kind, post_id=None, beacon_id=None, actor=None):
+    actor = actor or g.user
+    if user_id == actor.id:
         return
-    db.session.add(Notification(user_id=user_id, actor_id=g.user.id, kind=kind, post_id=post_id))
+    db.session.add(Notification(
+        user_id=user_id, actor_id=actor.id, kind=kind, post_id=post_id, beacon_id=beacon_id,
+    ))
 
 
 def unnotify(user_id, kind, post_id=None):
     Notification.query.filter_by(
         user_id=user_id, actor_id=g.user.id, kind=kind, post_id=post_id
     ).delete()
+
+
+def make_friends(a, b):
+    """Взаимная подписка — так новичок, пришедший по приглашению, сразу не один."""
+    for follower, followed in ((a, b), (b, a)):
+        if follower.id != followed.id and not db.session.get(Follow, (follower.id, followed.id)):
+            db.session.add(Follow(follower_id=follower.id, followed_id=followed.id))
+
+
+def mutual_friend_ids(user):
+    """id тех, с кем user подписан взаимно."""
+    following = db.session.query(Follow.followed_id).filter(Follow.follower_id == user.id)
+    return db.session.query(Follow.follower_id).filter(
+        Follow.followed_id == user.id, Follow.follower_id.in_(following)
+    )
+
+
+# ---------- Маяки ----------
+
+def purge_expired_beacons():
+    for beacon in Beacon.query.filter(Beacon.expires_at <= now()).all():
+        db.session.delete(beacon)
+    db.session.commit()
+
+
+def can_see_beacon(user, beacon):
+    """Видеть маяк в ленте может автор, участник, взаимный друг или близкий круг —
+    в зависимости от того, кому автор его зажёг. По ссылке — любой, у кого она есть."""
+    if user is None:
+        return False
+    if beacon.author_id == user.id or beacon.has_member(user):
+        return True
+    if beacon.audience == "circle":
+        return in_circle(beacon.author, user)
+    return (
+        is_following(beacon.author, user) and is_following(user, beacon.author)
+    )
+
+
+def beacons_for(user):
+    """Активные маяки, которые user видит в полосе «Сейчас»."""
+    joined = db.session.query(BeaconMember.beacon_id).filter(BeaconMember.user_id == user.id)
+    circles = db.session.query(CircleMember.owner_id).filter(CircleMember.member_id == user.id)
+    return (
+        Beacon.query.filter(
+            Beacon.expires_at > now(),
+            or_(
+                Beacon.author_id == user.id,
+                Beacon.id.in_(joined),
+                and_(Beacon.audience == "friends", Beacon.author_id.in_(mutual_friend_ids(user))),
+                and_(Beacon.audience == "circle", Beacon.author_id.in_(circles)),
+            ),
+        )
+        .order_by(Beacon.starts_at, Beacon.id)
+        .all()
+    )
+
+
+def beacon_audience_ids(beacon):
+    if beacon.audience == "circle":
+        rows = db.session.query(CircleMember.member_id).filter(
+            CircleMember.owner_id == beacon.author_id
+        )
+    else:
+        rows = mutual_friend_ids(beacon.author)
+    return [row[0] for row in rows.limit(MAX_BEACON_NOTIFY)]
+
+
+def join_beacon(user, beacon):
+    if beacon.author_id == user.id or beacon.has_member(user):
+        return
+    db.session.add(BeaconMember(beacon_id=beacon.id, user_id=user.id))
+    notify(beacon.author_id, "beacon_join", beacon_id=beacon.id, actor=user)
+
+
+# ---------- Вопрос дня ----------
+
+def today():
+    return (now() + DAY_OFFSET).date()
+
+
+def question_for(day):
+    return DAILY_QUESTIONS[day.toordinal() % len(DAILY_QUESTIONS)]
+
+
+def answered_today(user):
+    return Answer.query.filter_by(user_id=user.id, day=today()).first()
+
+
+def answer_streak(user):
+    """Сколько дней подряд user отвечает (серия не сгорает, пока не прошёл сегодняшний день)."""
+    days = [
+        row.day for row in
+        Answer.query.filter_by(user_id=user.id).order_by(Answer.day.desc()).limit(400)
+    ]
+    expected = today()
+    if days and days[0] != expected:
+        expected -= timedelta(days=1)
+    streak = 0
+    for day in days:
+        if day != expected:
+            break
+        streak += 1
+        expected -= timedelta(days=1)
+    return streak
 
 
 def chat_timer(user, other):
@@ -497,13 +744,17 @@ def register_routes(app):
             user = User(username=username, email=email)
             user.set_password(password)
             db.session.add(user)
+            db.session.flush()
+
+            inviter = db.session.get(User, session.get("inviter_id") or 0)
+            if inviter:
+                user.invited_by_id = inviter.id
+                make_friends(user, inviter)
+                notify(inviter.id, "invite", actor=user)
             db.session.commit()
 
-            session.clear()
-            session.permanent = True
-            session["user_id"] = user.id
             flash(f"Добро пожаловать в NOWA, {username}!", "ok")
-            return redirect(url_for("feed", tab="all"))
+            return sign_in(user, url_for("feed", tab="all"))
 
         return render_template("register.html")
 
@@ -518,17 +769,29 @@ def register_routes(app):
                 flash("Неверный логин или пароль.", "error")
                 return render_template("login.html", login=login_value)
 
-            session.clear()
-            session.permanent = True
-            session["user_id"] = user.id
-
             next_url = request.args.get("next", "")
             # Разрешаем только относительные ссылки, чтобы не было редиректа на чужой сайт
             if not next_url.startswith("/") or next_url.startswith("//"):
                 next_url = url_for("feed")
-            return redirect(next_url)
+            return sign_in(user, next_url)
 
         return render_template("login.html")
+
+    def sign_in(user, next_url):
+        """Входим в аккаунт и доделываем то, ради чего человек пришёл по ссылке."""
+        pending_token = session.get("pending_beacon")
+        session.clear()
+        session.permanent = True
+        session["user_id"] = user.id
+
+        beacon = Beacon.query.filter_by(token=pending_token).first() if pending_token else None
+        if beacon and beacon.expires_at > now():
+            join_beacon(user, beacon)
+            make_friends(user, beacon.author)
+            db.session.commit()
+            flash(f"Ты в деле! {beacon.author.username} уже знает.", "ok")
+            return redirect(url_for("beacon_page", token=beacon.token))
+        return redirect(next_url)
 
     @app.route("/logout", methods=["POST"])
     def logout():
@@ -568,9 +831,12 @@ def register_routes(app):
         has_more = len(posts) > FEED_PAGE_SIZE
         posts = posts[:FEED_PAGE_SIZE]
 
+        purge_expired_beacons()
         return render_template(
             "feed.html", posts=posts, tab=tab, has_more=has_more,
-            liked=liked_ids(posts),
+            liked=liked_ids(posts), beacons=beacons_for(g.user),
+            question=question_for(today()), answered=answered_today(g.user),
+            following_count=Follow.query.filter_by(follower_id=g.user.id).count(),
         )
 
     def liked_ids(posts):
@@ -764,7 +1030,8 @@ def register_routes(app):
             .order_by(User.username)
             .all()
         )
-        return render_template("settings.html", circle=circle)
+        invited = User.query.filter_by(invited_by_id=g.user.id).count()
+        return render_template("settings.html", circle=circle, invited=invited)
 
     @app.route("/u/<username>/follow", methods=["POST"])
     @login_required
@@ -833,6 +1100,185 @@ def register_routes(app):
             ).limit(30).all()
         return render_template(
             "search.html", q=q, users=users, posts=posts, liked=liked_ids(posts)
+        )
+
+    # ---------- МАЯКИ ----------
+
+    def get_beacon(token):
+        beacon = Beacon.query.filter_by(token=token).first()
+        if beacon is None or beacon.expires_at <= now():
+            abort(404, "Этот маяк уже погас.")
+        return beacon
+
+    def beacon_message_json(message):
+        return {
+            "id": message.id,
+            "mine": message.user_id == g.user.id,
+            "author": message.user.username,
+            "text": message.text,
+            "time": iso(message.created_at),
+        }
+
+    @app.route("/beacons/new", methods=["GET", "POST"])
+    @login_required
+    def new_beacon():
+        if request.method == "POST":
+            activity = request.form.get("activity", "other")
+            if activity not in BEACON_ACTIVITIES:
+                activity = "other"
+            title = request.form.get("title", "").strip()[:80]
+            place = request.form.get("place", "").strip()[:120]
+            audience = "circle" if request.form.get("audience") == "circle" else "friends"
+            hours = request.form.get("hours", 3, type=int)
+            if hours not in BEACON_DURATIONS:
+                hours = 3
+
+            starts_at = now()
+            when = request.form.get("when", "now")
+            if when in ("30", "60", "120"):
+                starts_at = now() + timedelta(minutes=int(when))
+            elif when == "at" and request.form.get("at"):
+                # Время из поля <input type="time"> — по часам пользователя, сегодня или завтра
+                try:
+                    hour, minute = map(int, request.form["at"].split(":"))
+                    offset = timedelta(minutes=request.form.get("tz_offset", 0, type=int))
+                    local_now = now() - offset
+                    local_start = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if local_start < local_now - timedelta(minutes=5):
+                        local_start += timedelta(days=1)
+                    starts_at = local_start + offset
+                except ValueError:
+                    flash("Не поняли время. Выбери ещё раз.", "error")
+                    return redirect(url_for("new_beacon"))
+
+            beacon = Beacon(
+                author_id=g.user.id, activity=activity, title=title, place=place,
+                audience=audience, starts_at=starts_at,
+                expires_at=max(starts_at, now()) + timedelta(hours=hours),
+            )
+            db.session.add(beacon)
+            db.session.flush()
+            for user_id in beacon_audience_ids(beacon):
+                notify(user_id, "beacon", beacon_id=beacon.id)
+            db.session.commit()
+            flash("Маяк зажжён! Друзья его видят. Можешь отправить ссылку кому угодно.", "ok")
+            return redirect(url_for("beacon_page", token=beacon.token))
+
+        return render_template(
+            "new_beacon.html", activities=BEACON_ACTIVITIES, durations=BEACON_DURATIONS,
+        )
+
+    @app.route("/b/<token>")
+    def beacon_page(token):
+        purge_expired_beacons()
+        beacon = get_beacon(token)
+        # Ссылка — это приглашение: открыть маяк может любой, у кого она есть.
+        # Но место встречи и чат видят только участники.
+        inside = g.user is not None and (
+            beacon.author_id == g.user.id or beacon.has_member(g.user)
+        )
+        return render_template("beacon.html", beacon=beacon, inside=inside)
+
+    @app.route("/b/<token>/join", methods=["POST"])
+    def join_beacon_route(token):
+        beacon = get_beacon(token)
+        if g.user is None:
+            session["pending_beacon"] = beacon.token
+            flash(f"Зарегистрируйся за 20 секунд — и сразу попадёшь в маяк {beacon.author.username}.", "ok")
+            return redirect(url_for("register"))
+
+        member = db.session.get(BeaconMember, (beacon.id, g.user.id))
+        if member:
+            db.session.delete(member)
+            Notification.query.filter_by(
+                user_id=beacon.author_id, actor_id=g.user.id, kind="beacon_join", beacon_id=beacon.id,
+            ).delete()
+            flash("Ты больше не идёшь.", "ok")
+        elif beacon.author_id != g.user.id:
+            join_beacon(g.user, beacon)
+            flash(f"Ты в деле! {beacon.author.username} уже знает.", "ok")
+        db.session.commit()
+        return redirect(request.referrer or url_for("beacon_page", token=beacon.token))
+
+    @app.route("/b/<token>/cancel", methods=["POST"])
+    @login_required
+    def cancel_beacon(token):
+        beacon = get_beacon(token)
+        if beacon.author_id != g.user.id:
+            abort(403)
+        db.session.delete(beacon)
+        db.session.commit()
+        flash("Маяк погашен.", "ok")
+        return redirect(url_for("feed"))
+
+    @app.route("/b/<token>/chat", methods=["POST"])
+    @login_required
+    def beacon_chat(token):
+        beacon = get_beacon(token)
+        if not (beacon.author_id == g.user.id or beacon.has_member(g.user)):
+            abort(403)
+        text_value = request.form.get("text", "").strip()
+        wants_json = request.headers.get("Accept") == "application/json"
+        if not text_value or len(text_value) > MAX_MESSAGE_LENGTH:
+            if wants_json:
+                return jsonify(error="Пустое или слишком длинное сообщение"), 400
+            return redirect(url_for("beacon_page", token=beacon.token))
+        message = BeaconMessage(beacon_id=beacon.id, user_id=g.user.id, text=text_value)
+        db.session.add(message)
+        db.session.commit()
+        if wants_json:
+            return jsonify(beacon_message_json(message))
+        return redirect(url_for("beacon_page", token=beacon.token) + "#chat")
+
+    @app.route("/api/b/<token>/chat")
+    @login_required
+    def beacon_chat_updates(token):
+        beacon = get_beacon(token)
+        if not (beacon.author_id == g.user.id or beacon.has_member(g.user)):
+            abort(403)
+        after = request.args.get("after", 0, type=int)
+        messages = [m for m in beacon.messages if m.id > after]
+        return jsonify([beacon_message_json(m) for m in messages])
+
+    # ---------- ПРИГЛАШЕНИЯ ----------
+
+    @app.route("/i/<code>")
+    def invite(code):
+        inviter = User.query.filter_by(invite_code=code).first() or abort(404)
+        if g.user:
+            return redirect(url_for("profile", username=inviter.username))
+        session["inviter_id"] = inviter.id
+        return render_template("invite.html", inviter=inviter)
+
+    # ---------- ВОПРОС ДНЯ ----------
+
+    @app.route("/question", methods=["GET", "POST"])
+    @login_required
+    def daily_question():
+        day = today()
+        mine = answered_today(g.user)
+
+        if request.method == "POST" and mine is None:
+            text_value = request.form.get("text", "").strip()
+            if not text_value or len(text_value) > 500:
+                flash("Ответ пустой или длиннее 500 символов.", "error")
+            else:
+                db.session.add(Answer(user_id=g.user.id, day=day, text=text_value))
+                db.session.commit()
+            return redirect(url_for("daily_question"))
+
+        answers = []
+        if mine:
+            following = db.session.query(Follow.followed_id).filter(
+                Follow.follower_id == g.user.id
+            )
+            answers = (
+                Answer.query.filter(Answer.day == day, Answer.user_id.in_(following))
+                .order_by(Answer.created_at.desc()).all()
+            )
+        return render_template(
+            "question.html", question=question_for(day), mine=mine, answers=answers,
+            total=Answer.query.filter_by(day=day).count(), streak=answer_streak(g.user),
         )
 
     # ---------- СООБЩЕНИЯ ----------
@@ -935,7 +1381,11 @@ def register_routes(app):
 
     @app.errorhandler(404)
     def not_found(error):
-        return render_template("error.html", code=404, text="Такой страницы нет."), 404
+        # Свой текст ошибки (например, «маяк погас») показываем, стандартный английский — нет
+        text_value = error.description
+        if not text_value or text_value == NotFound.description:
+            text_value = "Такой страницы нет."
+        return render_template("error.html", code=404, text=text_value), 404
 
     @app.errorhandler(403)
     def forbidden(error):

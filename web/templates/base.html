@@ -10,6 +10,11 @@
     <link rel="icon" href="{{ url_for('static', filename='icon.svg') }}" type="image/svg+xml">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    {% block head %}
+    <meta property="og:title" content="NOWA — что сейчас?">
+    <meta property="og:description" content="Соцсеть для своих, которая выводит в жизнь. Без VPN, без установки, без номера телефона.">
+    <meta property="og:image" content="{{ url_for('static', filename='icon-512.png', _external=True) }}">
+    {% endblock %}
 </head>
 <body class="{% if lite %}lite{% endif %}" data-poll="{{ '1' if me and not lite else '0' }}">
 

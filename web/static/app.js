@@ -105,63 +105,197 @@ if (polling) {
     setTimeout(updateCounters, 20000);
 }
 
-// Чат: отправка без перезагрузки и проверка новых сообщений
+// Поделиться ссылкой: системное меню телефона, а если его нет — копируем
+document.addEventListener("click", async (event) => {
+    const button = event.target.closest(".share-btn");
+    if (!button) return;
+    const { url, text } = button.dataset;
+    if (navigator.share) {
+        try {
+            await navigator.share({ title: "NOWA", text, url });
+            return;
+        } catch (error) {
+            if (error.name === "AbortError") return;
+        }
+    }
+    try {
+        await navigator.clipboard.writeText(`${text} ${url}`);
+        const old = button.textContent;
+        button.textContent = "✓ Ссылка скопирована";
+        setTimeout(() => { button.textContent = old; }, 2000);
+    } catch (error) {
+        prompt("Скопируй ссылку:", url);
+    }
+});
+
+// Выбрал время в маяке — сразу отмечаем вариант «В …»
+document.querySelectorAll(".inline-time").forEach((input) => {
+    input.addEventListener("input", () => {
+        input.closest("label").querySelector('input[type="radio"]').checked = true;
+    });
+});
+
+// При выходе стираем сохранённые страницы — чтобы на чужом телефоне ничего не осталось
+document.querySelectorAll('form[action="/logout"]').forEach((form) => {
+    form.addEventListener("submit", () => {
+        if (window.caches) caches.keys().then((keys) => keys.forEach((key) => caches.delete(key)));
+        try { localStorage.removeItem("nowa-outbox"); } catch (error) { /* нет доступа */ }
+    });
+});
+
+// ---------- Очередь сообщений: пишешь без сети — уйдёт, когда связь вернётся ----------
+
+const outbox = {
+    load() {
+        try { return JSON.parse(localStorage.getItem("nowa-outbox") || "[]"); } catch (error) { return []; }
+    },
+    save(items) {
+        try { localStorage.setItem("nowa-outbox", JSON.stringify(items)); } catch (error) { /* нет места */ }
+    },
+    add(item) {
+        const items = this.load();
+        items.push(item);
+        this.save(items);
+    },
+    remove(id) {
+        this.save(this.load().filter((item) => item.id !== id));
+    },
+};
+
+const sendMessage = async (url, text) => {
+    const body = new FormData();
+    body.append("text", text);
+    body.append("csrf", csrf);
+    const response = await fetch(url, { method: "POST", headers: { "Accept": "application/json" }, body });
+    if (!response.ok) {
+        const error = new Error("send failed");
+        error.fatal = response.status >= 400 && response.status < 500;
+        throw error;
+    }
+    return response.json();
+};
+
+let flushing = false;
+const flushOutbox = async () => {
+    if (flushing || !navigator.onLine) return;
+    flushing = true;
+    for (const item of outbox.load()) {
+        try {
+            const message = await sendMessage(item.url, item.text);
+            outbox.remove(item.id);
+            document.dispatchEvent(new CustomEvent("nowa:sent", { detail: { local: item.id, message } }));
+        } catch (error) {
+            if (error.fatal) {
+                outbox.remove(item.id);
+                document.dispatchEvent(new CustomEvent("nowa:failed", { detail: { local: item.id } }));
+            } else {
+                break;
+            }
+        }
+    }
+    flushing = false;
+};
+window.addEventListener("online", flushOutbox);
+setInterval(flushOutbox, 15000);
+flushOutbox();
+
+const updateNetworkBadge = () => document.body.classList.toggle("offline", !navigator.onLine);
+window.addEventListener("online", updateNetworkBadge);
+window.addEventListener("offline", updateNetworkBadge);
+updateNetworkBadge();
+
+// ---------- Чаты: личный и чат маяка ----------
+
 const chat = document.querySelector(".chat");
 if (chat) {
     const log = document.getElementById("chat-log");
     const form = document.getElementById("chat-form");
     const input = form.querySelector('input[name="text"]');
+    const sendUrl = chat.dataset.send || location.pathname;
 
     const lastId = () => {
-        const bubbles = log.querySelectorAll(".bubble");
+        const bubbles = log.querySelectorAll(".bubble[data-id]");
         return bubbles.length ? Number(bubbles[bubbles.length - 1].dataset.id) : 0;
     };
 
-    const addBubble = (message) => {
-        if (log.querySelector(`[data-id="${message.id}"]`)) return;
+    const makeBubble = (message) => {
         log.querySelector(".empty")?.remove();
         const bubble = document.createElement("div");
         bubble.className = "bubble" + (message.mine ? " mine" : "");
-        bubble.dataset.id = message.id;
+        if (message.author && !message.mine) {
+            const who = document.createElement("span");
+            who.className = "who";
+            who.textContent = message.author;
+            bubble.appendChild(who);
+        }
         const text = document.createElement("span");
         text.className = "msg";
         text.textContent = message.text;
         bubble.appendChild(text);
         const time = document.createElement("span");
         time.className = "time";
-        time.textContent = (message.expires ? "🕒 " : "") + formatTime(message.time, "time");
         bubble.appendChild(time);
+        return bubble;
+    };
+
+    const setTime = (bubble, message) => {
+        bubble.dataset.id = message.id;
+        bubble.classList.remove("pending");
+        bubble.querySelector(".time").textContent =
+            (message.expires ? "🕒 " : "") + formatTime(message.time, "time");
+    };
+
+    const addBubble = (message) => {
+        if (log.querySelector(`[data-id="${message.id}"]`)) return;
+        const bubble = makeBubble(message);
+        setTime(bubble, message);
+        // Новые сообщения встают перед ещё не отправленными
+        const firstPending = log.querySelector(".bubble.pending");
+        log.insertBefore(bubble, firstPending);
+        log.scrollTop = log.scrollHeight;
+    };
+
+    const addPending = (item) => {
+        const bubble = makeBubble({ text: item.text, mine: true });
+        bubble.classList.add("pending");
+        bubble.dataset.local = item.id;
+        bubble.querySelector(".time").textContent = "⏳";
+        bubble.title = "Отправится, когда появится связь";
         log.appendChild(bubble);
         log.scrollTop = log.scrollHeight;
     };
 
+    // Неотправленные сообщения этого чата показываем сразу
+    outbox.load().filter((item) => item.url === sendUrl).forEach(addPending);
+
+    document.addEventListener("nowa:sent", ({ detail }) => {
+        const bubble = log.querySelector(`[data-local="${detail.local}"]`);
+        if (!bubble) return;
+        if (log.querySelector(`[data-id="${detail.message.id}"]`)) return bubble.remove();
+        setTime(bubble, detail.message);
+    });
+    document.addEventListener("nowa:failed", ({ detail }) => {
+        const bubble = log.querySelector(`[data-local="${detail.local}"]`);
+        if (bubble) bubble.querySelector(".time").textContent = "⚠️ не отправлено";
+    });
+
     log.scrollTop = log.scrollHeight;
 
-    form.addEventListener("submit", async (event) => {
+    form.addEventListener("submit", (event) => {
         event.preventDefault();
         const text = input.value.trim();
         if (!text) return;
         input.value = "";
-
-        const body = new FormData();
-        body.append("text", text);
-        body.append("csrf", csrf);
-        const response = await fetch(location.pathname, {
-            method: "POST",
-            headers: { "Accept": "application/json" },
-            body,
-        });
-        if (response.ok) {
-            addBubble(await response.json());
-        } else {
-            input.value = text;
-        }
+        const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, url: sendUrl, text };
+        outbox.add(item);
+        addPending(item);
+        flushOutbox();
     });
 
     // В экономном режиме не опрашиваем сервер — обновление по кнопке
     if (polling) {
         const poll = async () => {
-            if (document.visibilityState === "visible") {
+            if (document.visibilityState === "visible" && navigator.onLine) {
                 try {
                     const response = await fetch(`${chat.dataset.api}?after=${lastId()}`);
                     if (response.ok) (await response.json()).forEach(addBubble);

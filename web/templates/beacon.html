@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_macros.html" import avatar with context %}
+{% block title %}{{ beacon.emoji }} {{ beacon.label }} · {{ beacon.author.username }} · NOWA{% endblock %}
+{% block head %}
+    <meta property="og:title" content="{{ beacon.author.username }} зажёг маяк: {{ beacon.emoji }} {{ beacon.label }}">
+    <meta property="og:description" content="{% if beacon.started %}Прямо сейчас{% else %}Скоро{% endif %} · идут {{ beacon.members|length }} · Жми «Я в деле» в NOWA">
+    <meta property="og:image" content="{{ url_for('static', filename='icon-512.png', _external=True) }}">
+    <meta property="og:url" content="{{ url_for('beacon_page', token=beacon.token, _external=True) }}">
+{% endblock %}
+{% block content %}
+<section class="card beacon-hero">
+    <div class="beacon-big">{{ beacon.emoji }}</div>
+    <h2>{{ beacon.label }}</h2>
+    <a class="author" href="{{ url_for('profile', username=beacon.author.username) }}">
+        {{ avatar(beacon.author) }} {{ beacon.author.username }}</a>
+    <p class="beacon-when">
+        {% if beacon.started %}🟢 Прямо сейчас{% else %}🕒 Начало в <time class="local" data-format="datetime" datetime="{{ beacon.starts_at|iso }}">{{ beacon.starts_at.strftime('%d.%m %H:%M') }} UTC</time>{% endif %}
+        · погаснет <time class="local" data-format="time" datetime="{{ beacon.expires_at|iso }}">{{ beacon.expires_at.strftime('%H:%M') }}</time>
+    </p>
+    {% if inside and beacon.place %}<p>📍 {{ beacon.place }}</p>
+    {% elif beacon.place %}<p class="muted">📍 Место увидишь, когда присоединишься</p>{% endif %}
+
+    <div class="members">
+        <span class="muted">Идут: {{ beacon.members|length }}</span>
+        <div class="avatars">
+            {% for member in beacon.members %}
+                <a href="{{ url_for('profile', username=member.user.username) }}" title="{{ member.user.username }}">{{ avatar(member.user, 'small') }}</a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="row center">
+        {% if me and me.id == beacon.author_id %}
+            <button type="button" class="btn share-btn" data-url="{{ url_for('beacon_page', token=beacon.token, _external=True) }}"
+                    data-text="{{ beacon.emoji }} {{ beacon.label }} — я свободен, кто со мной? Жми «Я в деле»:">📤 Позвать по ссылке</button>
+            <form method="post" action="{{ url_for('cancel_beacon', token=beacon.token) }}" onsubmit="return confirm('Погасить маяк? Чат исчезнет.')">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="btn danger">Погасить</button>
+            </form>
+        {% else %}
+            <form method="post" action="{{ url_for('join_beacon_route', token=beacon.token) }}">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                {% if inside %}
+                    <button class="btn ghost">Не смогу</button>
+                {% else %}
+                    <button class="btn big-cta">🙋 Я в деле!</button>
+                {% endif %}
+            </form>
+            {% if inside %}
+                <button type="button" class="btn ghost share-btn" data-url="{{ url_for('beacon_page', token=beacon.token, _external=True) }}"
+                        data-text="{{ beacon.emoji }} {{ beacon.label }} — пойдём вместе:">📤 Позвать ещё</button>
+            {% endif %}
+        {% endif %}
+    </div>
+    {% if not me %}
+        <p class="muted small">NOWA — соцсеть для своих. Без VPN, без установки, без номера телефона.</p>
+    {% endif %}
+</section>
+
+{% if inside %}
+<section class="card chat beacon-chat" id="chat" data-api="{{ url_for('beacon_chat_updates', token=beacon.token) }}"
+         data-send="{{ url_for('beacon_chat', token=beacon.token) }}" data-group="1">
+    <header class="chat-head"><b>Чат маяка</b><span class="muted">исчезнет, когда маяк погаснет</span></header>
+    <div class="chat-log" id="chat-log">
+        {% for message in beacon.messages %}
+            <div class="bubble {% if message.user_id == me.id %}mine{% endif %}" data-id="{{ message.id }}">
+                {%- if message.user_id != me.id %}<span class="who">{{ message.user.username }}</span>{% endif -%}
+                <span class="msg">{{ message.text }}</span><span class="time"><time class="local" data-format="time" datetime="{{ message.created_at|iso }}">{{ message.created_at.strftime('%H:%M') }}</time></span></div>
+        {% else %}
+            <p class="muted empty">Договоритесь, где встречаетесь 👋</p>
+        {% endfor %}
+    </div>
+    <form method="post" action="{{ url_for('beacon_chat', token=beacon.token) }}" class="row chat-form" id="chat-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="text" maxlength="4000" placeholder="Сообщение…" autocomplete="off" required>
+        <button class="btn">➤</button>
+    </form>
+</section>
+{% endif %}
+{% endblock %}

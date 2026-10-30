@@ -15,6 +15,12 @@
                     прокомментировал(а) твой <a href="{{ url_for('view_post', post_id=item.post_id) }}#comments">пост</a> 💬
                 {% elif item.kind == 'follow' %}
                     подписался(ась) на тебя 👋
+                {% elif item.kind == 'beacon' and item.beacon %}
+                    зажёг маяк: <a href="{{ url_for('beacon_page', token=item.beacon.token) }}">{{ item.beacon.emoji }} {{ item.beacon.label }}</a> 🔆
+                {% elif item.kind == 'beacon_join' and item.beacon %}
+                    в деле! Идёт на твой <a href="{{ url_for('beacon_page', token=item.beacon.token) }}">маяк {{ item.beacon.emoji }}</a>
+                {% elif item.kind == 'invite' %}
+                    пришёл(ла) в NOWA по твоему приглашению — теперь вы друзья 🎉
                 {% endif %}
                 {% if item.post and item.post.text %}<div class="muted quote">«{{ item.post.text|truncate(80) }}»</div>{% endif %}
                 <div class="muted">{{ item.created_at|ago }}</div>

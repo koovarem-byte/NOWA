@@ -19,6 +19,16 @@
     <div class="row"><span></span><button class="btn">Сохранить</button></div>
 </form>
 
+<section class="card" id="invite">
+    <h3>💌 Позвать друзей</h3>
+    <p class="muted">Кто зарегистрируется по этой ссылке, сразу станет твоим другом. Пригласил(а): {{ invited }}</p>
+    <div class="row">
+        <input readonly value="{{ url_for('invite', code=me.get_invite_code(), _external=True) }}" class="invite-link">
+        <button type="button" class="btn share-btn" data-url="{{ url_for('invite', code=me.get_invite_code(), _external=True) }}"
+                data-text="Я в NOWA — заходи, будем на связи. Без VPN и без номера телефона:">📤</button>
+    </div>
+</section>
+
 <section class="card">
     <h3>🔒 Близкий круг</h3>
     <p class="muted">Эти люди видят посты, которые ты публикуешь «только для круга». Они не знают, что они в твоём круге.</p>

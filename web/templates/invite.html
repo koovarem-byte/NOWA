@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% from "_macros.html" import avatar with context %}
+{% block title %}{{ inviter.username }} зовёт тебя в NOWA{% endblock %}
+{% block head %}
+    <meta property="og:title" content="{{ inviter.username }} зовёт тебя в NOWA">
+    <meta property="og:description" content="Соцсеть для своих, которая выводит в жизнь. Без VPN, без установки, без номера телефона.">
+    <meta property="og:image" content="{{ url_for('static', filename='icon-512.png', _external=True) }}">
+{% endblock %}
+{% block content %}
+<section class="hero">
+    {{ avatar(inviter, 'big') }}
+    <h2>{{ inviter.username }} зовёт тебя в NOWA</h2>
+    <p>Зарегистрируйся — и вы сразу будете друзьями.<br>Без VPN, без установки, без номера телефона.</p>
+    <div class="row center">
+        <a class="btn" href="{{ url_for('register') }}">Присоединиться</a>
+        <a class="btn ghost" href="{{ url_for('login') }}">У меня уже есть аккаунт</a>
+    </div>
+</section>
+{% endblock %}

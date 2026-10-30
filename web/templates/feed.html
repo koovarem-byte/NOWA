@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Лента · NOWA{% endblock %}
 {% block content %}
+{% include "_beacon_strip.html" %}
+
+{% if not answered %}
+<a class="card question-card" href="{{ url_for('daily_question') }}">
+    <span class="muted">💭 Вопрос дня</span>
+    <b>{{ question }}</b>
+    <span class="muted">Ответь — и увидишь ответы друзей</span>
+</a>
+{% endif %}
+
 <div class="tabs">
     <a href="{{ url_for('feed', tab='following') }}" class="{% if tab == 'following' %}active{% endif %}">Подписки</a>
     <a href="{{ url_for('feed', tab='all') }}" class="{% if tab == 'all' %}active{% endif %}">Все</a>
@@ -16,6 +26,8 @@
     <a class="btn ghost wide" href="{{ url_for('feed', tab=tab, before=posts[-1].id) }}">Показать ещё</a>
 {% elif posts %}
     <div class="end">✅ Ты всё посмотрел. Можно закрыть и жить дальше.</div>
+{% elif tab == 'following' and following_count %}
+    <div class="end">У друзей пока нет постов. Загляни во вкладку <a href="{{ url_for('feed', tab='all') }}">«Все»</a> или зажги маяк 🔆</div>
 {% elif tab == 'following' %}
     <div class="end">Ты пока ни на кого не подписан. Загляни во вкладку <a href="{{ url_for('feed', tab='all') }}">«Все»</a> или найди друзей через <a href="{{ url_for('search') }}">поиск</a>.</div>
 {% else %}
