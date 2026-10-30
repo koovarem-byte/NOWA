@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Вход · NOWA{% endblock %}
+{% block content %}
+<form class="card auth" method="post">
+    <h2>Вход в NOWA</h2>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Почта или имя
+        <input name="login" value="{{ login or '' }}" autocomplete="username" required></label>
+    <label>Пароль
+        <input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="btn">Войти</button>
+    <p class="muted">Нет аккаунта? <a href="{{ url_for('register') }}">Регистрация</a></p>
+</form>
+{% endblock %}

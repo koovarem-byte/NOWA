@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ other.username }} · NOWA{% endblock %}
+{% block content %}
+<section class="card chat" data-username="{{ other.username }}" data-poll="{{ '0' if lite else '1' }}"
+         data-api="{{ url_for('new_messages', username=other.username) }}">
+    <header class="chat-head">
+        <a href="{{ url_for('messages') }}" class="muted">←</a>
+        <a class="author" href="{{ url_for('profile', username=other.username) }}">
+            <span class="avatar">{{ other.username[0]|upper }}</span>{{ other.username }}</a>
+        {% if lite %}<a class="muted" href="">⟳ обновить</a>{% endif %}
+    </header>
+    <div class="chat-log" id="chat-log">
+        {% for message in history %}
+            <div class="bubble {% if message.sender_id == me.id %}mine{% endif %}" data-id="{{ message.id }}">
+                {{ message.text }}<span class="time">{{ message.created_at.strftime('%H:%M') }}</span>
+            </div>
+        {% else %}
+            <p class="muted empty">Напиши первое сообщение 👋</p>
+        {% endfor %}
+    </div>
+    <form method="post" class="row chat-form" id="chat-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input name="text" maxlength="4000" placeholder="Сообщение…" autocomplete="off" required>
+        <button class="btn">➤</button>
+    </form>
+</section>
+{% endblock %}

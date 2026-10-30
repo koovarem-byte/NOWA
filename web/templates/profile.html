@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ user.username }} · NOWA{% endblock %}
+{% block content %}
+<section class="card profile">
+    <span class="avatar big">{{ user.username[0]|upper }}</span>
+    <h2>{{ user.username }}</h2>
+    {% if user.bio %}<p>{{ user.bio }}</p>{% endif %}
+    <div class="stats">
+        <span><b>{{ stats.posts }}</b> постов</span>
+        <span><b>{{ stats.followers }}</b> подписчиков</span>
+        <span><b>{{ stats.following }}</b> подписок</span>
+    </div>
+
+    {% if me and me.id == user.id %}
+        <a class="btn ghost" href="{{ url_for('settings') }}">Настройки и близкий круг</a>
+    {% elif me %}
+        <div class="row center">
+            <form method="post" action="{{ url_for('follow', username=user.username) }}">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                {% if is_following(me, user) %}
+                    <button class="btn ghost">Отписаться</button>
+                {% else %}
+                    <button class="btn">Подписаться</button>
+                {% endif %}
+            </form>
+            <a class="btn ghost" href="{{ url_for('chat', username=user.username) }}">✉️ Написать</a>
+            <form method="post" action="{{ url_for('toggle_circle', username=user.username) }}">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="btn ghost" title="Близкий круг видит твои закрытые посты">
+                    {% if in_circle(me, user) %}🔒 В круге ✓{% else %}🔒 В близкий круг{% endif %}</button>
+            </form>
+        </div>
+    {% endif %}
+</section>
+
+{% if me and me.id == user.id %}{% include "_compose.html" %}{% endif %}
+
+{% for post in posts %}
+    {% include "_post.html" %}
+{% else %}
+    <div class="end">Постов пока нет.</div>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Лента · NOWA{% endblock %}
+{% block content %}
+<div class="tabs">
+    <a href="{{ url_for('feed', tab='following') }}" class="{% if tab == 'following' %}active{% endif %}">Подписки</a>
+    <a href="{{ url_for('feed', tab='all') }}" class="{% if tab == 'all' %}active{% endif %}">Все</a>
+</div>
+
+{% include "_compose.html" %}
+
+{% for post in posts %}
+    {% include "_post.html" %}
+{% endfor %}
+
+{% if has_more %}
+    <a class="btn ghost wide" href="{{ url_for('feed', tab=tab, before=posts[-1].id) }}">Показать ещё</a>
+{% elif posts %}
+    <div class="end">✅ Ты всё посмотрел. Можно закрыть и жить дальше.</div>
+{% elif tab == 'following' %}
+    <div class="end">Ты пока ни на кого не подписан. Загляни во вкладку <a href="{{ url_for('feed', tab='all') }}">«Все»</a> или найди друзей через <a href="{{ url_for('search') }}">поиск</a>.</div>
+{% else %}
+    <div class="end">Постов пока нет. Будь первым!</div>
+{% endif %}
+{% endblock %}

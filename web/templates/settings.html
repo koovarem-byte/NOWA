@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Настройки · NOWA{% endblock %}
+{% block content %}
+<form class="card compose" method="post">
+    <h3>О себе</h3>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <textarea name="bio" rows="3" maxlength="300" placeholder="Пара слов о себе">{{ me.bio or '' }}</textarea>
+    <div class="row"><span></span><button class="btn">Сохранить</button></div>
+</form>
+
+<section class="card">
+    <h3>🔒 Близкий круг</h3>
+    <p class="muted">Эти люди видят посты, которые ты публикуешь «только для круга». Они не знают, что они в твоём круге.</p>
+    {% for user in circle %}
+        <div class="user-row">
+            <a class="author" href="{{ url_for('profile', username=user.username) }}">
+                <span class="avatar">{{ user.username[0]|upper }}</span>{{ user.username }}</a>
+            <form method="post" action="{{ url_for('toggle_circle', username=user.username) }}">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="link muted">Убрать</button>
+            </form>
+        </div>
+    {% else %}
+        <p class="muted">Пока никого. Добавить человека можно кнопкой в его профиле.</p>
+    {% endfor %}
+</section>
+{% endblock %}

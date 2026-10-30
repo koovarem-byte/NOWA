@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Регистрация · NOWA{% endblock %}
+{% block content %}
+<form class="card auth" method="post">
+    <h2>Регистрация в NOWA</h2>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Имя пользователя
+        <input name="username" value="{{ username or '' }}" minlength="3" maxlength="32" autocomplete="username" required></label>
+    <label>Почта
+        <input name="email" type="email" value="{{ email or '' }}" autocomplete="email" required></label>
+    <label>Пароль
+        <input name="password" type="password" minlength="6" autocomplete="new-password" required></label>
+    <button class="btn">Создать аккаунт</button>
+    <p class="muted">Номер телефона не нужен. Уже есть аккаунт? <a href="{{ url_for('login') }}">Войти</a></p>
+</form>
+{% endblock %}

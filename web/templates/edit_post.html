@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Редактирование · NOWA{% endblock %}
+{% block content %}
+<form class="card compose" method="post">
+    <h3>Редактировать пост</h3>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <textarea name="text" rows="5" maxlength="2000" required>{{ post.text }}</textarea>
+    <div class="row">
+        <label class="muted"><input type="checkbox" name="visibility" value="circle" {% if post.visibility == 'circle' %}checked{% endif %}> 🔒 Только близкий круг</label>
+        <button class="btn">Сохранить</button>
+    </div>
+</form>
+<form method="post" action="{{ url_for('delete_post', post_id=post.id) }}" onsubmit="return confirm('Удалить пост?')">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn danger">Удалить пост</button>
+</form>
+{% endblock %}

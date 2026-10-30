@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Сообщения · NOWA{% endblock %}
+{% block content %}
+<section class="card">
+    <h3>Сообщения</h3>
+    {% for dialog in dialogs %}
+        <a class="dialog" href="{{ url_for('chat', username=dialog.user.username) }}">
+            <span class="avatar">{{ dialog.user.username[0]|upper }}</span>
+            <span class="dialog-body">
+                <b>{{ dialog.user.username }}</b>
+                <span class="muted">{% if dialog.last.sender_id == me.id %}Вы: {% endif %}{{ dialog.last.text|truncate(60) }}</span>
+            </span>
+            {% if dialog.unread %}<span class="badge">{{ dialog.unread }}</span>{% endif %}
+        </a>
+    {% else %}
+        <p class="muted">Диалогов пока нет. Открой профиль человека и нажми «Написать».</p>
+    {% endfor %}
+</section>
+{% endblock %}
