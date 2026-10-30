@@ -1,26 +1,35 @@
 {% extends "base.html" %}
 {% block title %}{{ other.username }} · NOWA{% endblock %}
 {% block content %}
-<section class="card chat" data-username="{{ other.username }}" data-poll="{{ '0' if lite else '1' }}"
-         data-api="{{ url_for('new_messages', username=other.username) }}">
+{% from "_macros.html" import avatar with context %}
+<section class="card chat" data-api="{{ url_for('new_messages', username=other.username) }}">
     <header class="chat-head">
         <a href="{{ url_for('messages') }}" class="muted">←</a>
         <a class="author" href="{{ url_for('profile', username=other.username) }}">
-            <span class="avatar">{{ other.username[0]|upper }}</span>{{ other.username }}</a>
-        {% if lite %}<a class="muted" href="">⟳ обновить</a>{% endif %}
+            {{ avatar(other) }}{{ other.username }}</a>
+        <form method="post" action="{{ url_for('set_chat_timer', username=other.username) }}" class="timer-form"
+              title="Исчезающие сообщения: новые сообщения удалятся у обоих через выбранное время">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <select name="seconds" onchange="this.form.submit()">
+                {% for seconds, label in timers.items() %}
+                    <option value="{{ seconds }}" {% if seconds == timer %}selected{% endif %}>🕒 {{ label }}</option>
+                {% endfor %}
+            </select>
+            <noscript><button class="link">OK</button></noscript>
+        </form>
+        {% if lite %}<a class="muted" href="">⟳</a>{% endif %}
     </header>
     <div class="chat-log" id="chat-log">
         {% for message in history %}
             <div class="bubble {% if message.sender_id == me.id %}mine{% endif %}" data-id="{{ message.id }}">
-                {{ message.text }}<span class="time">{{ message.created_at.strftime('%H:%M') }}</span>
-            </div>
+<span class="msg">{{ message.text }}</span><span class="time">{% if message.expires_at %}🕒 {% endif %}<time class="local" data-format="time" datetime="{{ message.created_at|iso }}">{{ message.created_at.strftime('%H:%M') }}</time></span></div>
         {% else %}
             <p class="muted empty">Напиши первое сообщение 👋</p>
         {% endfor %}
     </div>
     <form method="post" class="row chat-form" id="chat-form">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input name="text" maxlength="4000" placeholder="Сообщение…" autocomplete="off" required>
+        <input name="text" maxlength="4000" placeholder="{% if timer %}Исчезающее сообщение…{% else %}Сообщение…{% endif %}" autocomplete="off" required>
         <button class="btn">➤</button>
     </form>
 </section>

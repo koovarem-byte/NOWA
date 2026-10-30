@@ -1,11 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Сообщения · NOWA{% endblock %}
 {% block content %}
+{% from "_macros.html" import avatar with context %}
 <section class="card">
     <h3>Сообщения</h3>
     {% for dialog in dialogs %}
         <a class="dialog" href="{{ url_for('chat', username=dialog.user.username) }}">
-            <span class="avatar">{{ dialog.user.username[0]|upper }}</span>
+            {{ avatar(dialog.user) }}
             <span class="dialog-body">
                 <b>{{ dialog.user.username }}</b>
                 <span class="muted">{% if dialog.last.sender_id == me.id %}Вы: {% endif %}{{ dialog.last.text|truncate(60) }}</span>

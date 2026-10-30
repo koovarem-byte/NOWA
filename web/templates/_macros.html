@@ -1,0 +1,19 @@
+{% macro avatar(user, cls='') -%}
+    {%- if user.avatar_id and not lite -%}
+        <img class="avatar {{ cls }}" src="{{ url_for('image', image_id=user.avatar_id) }}" alt="" loading="lazy">
+    {%- else -%}
+        <span class="avatar {{ cls }}">{{ user.username[0]|upper }}</span>
+    {%- endif -%}
+{%- endmacro %}
+
+{% macro photo(image) -%}
+    {%- set src = url_for('image', image_id=image.id) -%}
+    {%- if lite -%}
+        <button type="button" class="photo-placeholder" data-src="{{ src }}"
+                style="aspect-ratio: {{ image.width }} / {{ image.height }}">
+            📷 Показать фото · {{ (image.data|length / 1024)|round|int }} КБ
+        </button>
+    {%- else -%}
+        <img class="photo" src="{{ src }}" width="{{ image.width }}" height="{{ image.height }}" alt="" loading="lazy">
+    {%- endif -%}
+{%- endmacro %}

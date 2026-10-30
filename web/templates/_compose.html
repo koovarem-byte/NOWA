@@ -1,8 +1,17 @@
-<form class="card compose" method="post" action="{{ url_for('new_post') }}">
+<form class="card compose" method="post" action="{{ url_for('new_post') }}" enctype="multipart/form-data">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <textarea name="text" rows="3" maxlength="2000" placeholder="Что нового, {{ me.username }}?" required></textarea>
-    <div class="row">
-        <label class="muted"><input type="checkbox" name="visibility" value="circle"> 🔒 Только близкий круг</label>
+    <input type="hidden" name="tz_offset" class="tz-offset">
+    <textarea name="text" rows="3" maxlength="2000" placeholder="Что нового, {{ me.username }}?"></textarea>
+    <img class="photo-preview" hidden alt="">
+    <div class="compose-tools">
+        <label class="tool" title="Прикрепить фото">📷 Фото
+            <input type="file" name="image" accept="image/*" hidden></label>
+        <label class="tool" title="Пост увидит только близкий круг">
+            <input type="checkbox" name="visibility" value="circle"> 🔒 Круг</label>
+        <details class="tool schedule">
+            <summary title="Опубликовать позже">⏰ Позже</summary>
+            <input type="datetime-local" name="publish_at">
+        </details>
         <button class="btn">Опубликовать</button>
     </div>
 </form>

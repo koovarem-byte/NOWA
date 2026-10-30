@@ -1,13 +1,19 @@
+{% from "_macros.html" import avatar, photo with context %}
 <article class="card post" id="post-{{ post.id }}">
     <header>
         <a class="author" href="{{ url_for('profile', username=post.author.username) }}">
-            <span class="avatar">{{ post.author.username[0]|upper }}</span>
+            {{ avatar(post.author) }}
             {{ post.author.username }}
         </a>
-        <a class="muted" href="{{ url_for('view_post', post_id=post.id) }}">{{ post.created_at|ago }}{% if post.edited_at %} · изменён{% endif %}</a>
+        {% if post.is_scheduled %}
+            <span class="tag scheduled" title="Пока видишь только ты">⏰ выйдет <time class="local" data-format="datetime" datetime="{{ post.published_at|iso }}">{{ post.published_at.strftime('%d.%m %H:%M') }} UTC</time></span>
+        {% else %}
+            <a class="muted" href="{{ url_for('view_post', post_id=post.id) }}">{{ post.published_at|ago }}{% if post.edited_at %} · изменён{% endif %}</a>
+        {% endif %}
         {% if post.visibility == 'circle' %}<span class="tag" title="Видит только близкий круг">🔒 круг</span>{% endif %}
     </header>
-    <p class="text">{{ post.text }}</p>
+    {% if post.text %}<p class="text">{{ post.text }}</p>{% endif %}
+    {% if post.image %}<a href="{{ url_for('view_post', post_id=post.id) }}" class="photo-link">{{ photo(post.image) }}</a>{% endif %}
     <footer>
         <form method="post" action="{{ url_for('like_post', post_id=post.id) }}" class="like-form">
             <input type="hidden" name="csrf" value="{{ csrf }}">

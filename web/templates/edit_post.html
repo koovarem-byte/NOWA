@@ -1,10 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Редактирование · NOWA{% endblock %}
 {% block content %}
+{% from "_macros.html" import photo with context %}
 <form class="card compose" method="post">
     <h3>Редактировать пост</h3>
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <textarea name="text" rows="5" maxlength="2000" required>{{ post.text }}</textarea>
+    <textarea name="text" rows="5" maxlength="2000" {% if not post.image %}required{% endif %}>{{ post.text }}</textarea>
+    {% if post.image %}{{ photo(post.image) }}{% endif %}
+    {% if post.is_scheduled %}
+        <label class="muted"><input type="checkbox" name="publish_now" value="1"> ⏰ Опубликовать сейчас, не дожидаясь
+            <time class="local" data-format="datetime" datetime="{{ post.published_at|iso }}">{{ post.published_at.strftime('%d.%m %H:%M') }} UTC</time></label>
+    {% endif %}
     <div class="row">
         <label class="muted"><input type="checkbox" name="visibility" value="circle" {% if post.visibility == 'circle' %}checked{% endif %}> 🔒 Только близкий круг</label>
         <button class="btn">Сохранить</button>

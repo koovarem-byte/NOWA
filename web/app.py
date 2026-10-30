@@ -1,23 +1,26 @@
 """NOWA — веб-версия соцсети.
 
 Запуск локально:   python web/app.py
-Запуск на сервере: gunicorn --chdir web app:app
+Запуск на сервере: gunicorn --chdir web app:app   (или через Dockerfile в корне)
 
 База данных берётся из переменной DATABASE_URL (PostgreSQL на хостинге),
 а если её нет — используется файл web/instance/nowa.db (SQLite).
 """
 
+import io
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import (
-    Flask, abort, flash, g, jsonify, redirect, render_template,
+    Flask, Response, abort, flash, g, jsonify, redirect, render_template,
     request, session, url_for, send_from_directory,
 )
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import and_, or_
+from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
+from sqlalchemy import and_, inspect, or_, text
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +31,19 @@ FEED_PAGE_SIZE = 30
 MAX_POST_LENGTH = 2000
 MAX_COMMENT_LENGTH = 1000
 MAX_MESSAGE_LENGTH = 4000
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+POST_IMAGE_SIZE = 1280
+AVATAR_SIZE = 256
+
+# Таймеры исчезающих сообщений: секунды -> подпись
+CHAT_TIMERS = {
+    0: "выкл",
+    60 * 60: "1 час",
+    60 * 60 * 24: "1 день",
+    60 * 60 * 24 * 7: "7 дней",
+}
+
+PILImage.MAX_IMAGE_PIXELS = 40_000_000
 
 
 def now():
@@ -36,12 +52,25 @@ def now():
 
 # ---------------- МОДЕЛИ ----------------
 
+class Image(db.Model):
+    """Картинки храним прямо в базе: так их не потеряешь при переезде
+    или перезапуске сервера, и не нужно настраивать отдельное хранилище."""
+    id = db.Column(db.Integer, primary_key=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    data = db.Column(db.LargeBinary, nullable=False)
+    mime = db.Column(db.String(30), nullable=False)
+    width = db.Column(db.Integer)
+    height = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=now)
+
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(32), unique=True, nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
     bio = db.Column(db.String(300), default="")
+    avatar_id = db.Column(db.Integer, db.ForeignKey("image.id", use_alter=True, name="fk_user_avatar"))
     created_at = db.Column(db.DateTime, default=now)
 
     def set_password(self, password):
@@ -54,17 +83,25 @@ class User(db.Model):
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     author_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
-    text = db.Column(db.Text, nullable=False)
+    text = db.Column(db.Text, nullable=False, default="")
+    image_id = db.Column(db.Integer, db.ForeignKey("image.id"))
     # "all" — видят все, "circle" — только близкий круг автора
     visibility = db.Column(db.String(10), default="all", nullable=False)
-    created_at = db.Column(db.DateTime, default=now, index=True)
+    created_at = db.Column(db.DateTime, default=now)
+    # Когда пост появляется в ленте. Для отложенных постов — в будущем.
+    published_at = db.Column(db.DateTime, default=now, index=True)
     edited_at = db.Column(db.DateTime)
 
     author = db.relationship("User")
+    image = db.relationship("Image")
     likes = db.relationship("Like", cascade="all, delete-orphan")
     comments = db.relationship(
         "Comment", cascade="all, delete-orphan", order_by="Comment.created_at"
     )
+
+    @property
+    def is_scheduled(self):
+        return self.published_at > now()
 
 
 class Like(db.Model):
@@ -100,8 +137,48 @@ class Message(db.Model):
     text = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=now)
     is_read = db.Column(db.Boolean, default=False, nullable=False)
+    # Если задано — сообщение удаляется в это время
+    expires_at = db.Column(db.DateTime, index=True)
 
     sender = db.relationship("User", foreign_keys=[sender_id])
+
+
+class ChatTimer(db.Model):
+    """Таймер исчезающих сообщений для диалога. user_a_id всегда меньше user_b_id."""
+    user_a_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    user_b_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    seconds = db.Column(db.Integer, nullable=False, default=0)
+
+
+class Notification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    actor_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    # "like", "comment", "follow"
+    kind = db.Column(db.String(20), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey("post.id", ondelete="CASCADE"))
+    created_at = db.Column(db.DateTime, default=now)
+    is_read = db.Column(db.Boolean, default=False, nullable=False)
+
+    actor = db.relationship("User", foreign_keys=[actor_id])
+    post = db.relationship("Post", backref=db.backref("notifications", cascade="all, delete-orphan"))
+
+
+def upgrade_schema():
+    """create_all не добавляет новые колонки в старые таблицы — дописываем их сами."""
+    columns = {
+        "user": [("avatar_id", "INTEGER")],
+        "post": [("image_id", "INTEGER"), ("published_at", "TIMESTAMP")],
+        "message": [("expires_at", "TIMESTAMP")],
+    }
+    inspector = inspect(db.engine)
+    with db.engine.begin() as connection:
+        for table, new_columns in columns.items():
+            existing = {column["name"] for column in inspector.get_columns(table)}
+            for name, sql_type in new_columns:
+                if name not in existing:
+                    connection.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {name} {sql_type}'))
+        connection.execute(text("UPDATE post SET published_at = created_at WHERE published_at IS NULL"))
 
 
 # ---------------- ЛОГИКА ----------------
@@ -115,33 +192,91 @@ def in_circle(owner, member):
 
 
 def visible_posts_query(viewer):
-    """Посты, которые viewer имеет право видеть."""
-    query = Post.query
+    """Посты, которые viewer имеет право видеть. Свои отложенные посты автор видит сразу."""
+    published = Post.published_at <= now()
     if viewer is None:
-        return query.filter(Post.visibility == "all")
+        return Post.query.filter(Post.visibility == "all", published)
 
     circles = db.session.query(CircleMember.owner_id).filter(
         CircleMember.member_id == viewer.id
     )
-    return query.filter(
+    return Post.query.filter(
         or_(
-            Post.visibility == "all",
             Post.author_id == viewer.id,
-            Post.author_id.in_(circles),
+            and_(
+                published,
+                or_(Post.visibility == "all", Post.author_id.in_(circles)),
+            ),
         )
     )
 
 
+def newest_first(query):
+    return query.order_by(Post.published_at.desc(), Post.id.desc())
+
+
 def can_see(viewer, post):
+    if viewer is not None and post.author_id == viewer.id:
+        return True
+    if post.is_scheduled:
+        return False
     if post.visibility == "all":
         return True
-    if viewer is None:
-        return False
-    return post.author_id == viewer.id or in_circle(post.author, viewer)
+    return viewer is not None and in_circle(post.author, viewer)
 
 
 def find_user(username):
     return User.query.filter(db.func.lower(User.username) == username.lower()).first()
+
+
+def save_image(file, owner, size, square=False):
+    """Сжимает картинку и сохраняет в базу. Возвращает Image или None, если файл не картинка."""
+    try:
+        picture = PILImage.open(file.stream)
+        picture = ImageOps.exif_transpose(picture)
+        picture = picture.convert("RGB")
+    except (UnidentifiedImageError, OSError, PILImage.DecompressionBombError):
+        return None
+
+    if square:
+        picture = ImageOps.fit(picture, (size, size), PILImage.LANCZOS)
+    else:
+        picture.thumbnail((size, size), PILImage.LANCZOS)
+
+    # WebP весит в 2–3 раза меньше JPEG — экономим трафик пользователей
+    buffer = io.BytesIO()
+    picture.save(buffer, "WEBP", quality=80, method=4)
+
+    image = Image(
+        owner_id=owner.id, data=buffer.getvalue(), mime="image/webp",
+        width=picture.width, height=picture.height,
+    )
+    db.session.add(image)
+    db.session.flush()
+    return image
+
+
+def notify(user_id, kind, post_id=None):
+    if user_id == g.user.id:
+        return
+    db.session.add(Notification(user_id=user_id, actor_id=g.user.id, kind=kind, post_id=post_id))
+
+
+def unnotify(user_id, kind, post_id=None):
+    Notification.query.filter_by(
+        user_id=user_id, actor_id=g.user.id, kind=kind, post_id=post_id
+    ).delete()
+
+
+def chat_timer(user, other):
+    a, b = sorted((user.id, other.id))
+    timer = db.session.get(ChatTimer, (a, b))
+    return timer.seconds if timer else 0
+
+
+def purge_expired_messages():
+    Message.query.filter(Message.expires_at <= now()).delete()
+    db.session.commit()
 
 
 def dialogs_for(user):
@@ -170,6 +305,20 @@ def unread_count(user):
     return Message.query.filter_by(receiver_id=user.id, is_read=False).count()
 
 
+def unseen_notifications(user):
+    return Notification.query.filter_by(user_id=user.id, is_read=False).count()
+
+
+def parse_local_datetime(value, offset_minutes):
+    """Переводит время из браузера пользователя (его часовой пояс) в UTC."""
+    try:
+        local = datetime.fromisoformat(value)
+        offset = int(offset_minutes or 0)
+    except ValueError:
+        return None
+    return local + timedelta(minutes=offset)
+
+
 # ---------------- ПРИЛОЖЕНИЕ ----------------
 
 def login_required(view):
@@ -183,6 +332,8 @@ def login_required(view):
 
 def create_app(config=None):
     app = Flask(__name__, instance_path=os.path.join(BASE_DIR, "instance"))
+    # На хостинге приложение стоит за прокси — доверяем его заголовкам про https и IP
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     database_url = os.environ.get("DATABASE_URL", "")
     # Некоторые хостинги отдают адрес как postgres://, SQLAlchemy ждёт postgresql://
@@ -195,8 +346,11 @@ def create_app(config=None):
     app.config.update(
         SECRET_KEY=os.environ.get("SECRET_KEY") or load_dev_secret(app.instance_path),
         SQLALCHEMY_DATABASE_URI=database_url,
+        SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
+        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.environ.get("NOWA_HTTPS") == "1",
         PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30,
     )
     if config:
@@ -205,6 +359,10 @@ def create_app(config=None):
     db.init_app(app)
     with app.app_context():
         db.create_all()
+        upgrade_schema()
+        # gunicorn --preload создаёт приложение до запуска процессов —
+        # закрываем соединения, чтобы процессы не делили одно подключение к базе
+        db.engine.dispose()
 
     register_routes(app)
     return app
@@ -229,7 +387,7 @@ def register_routes(app):
         g.user = db.session.get(User, user_id) if user_id else None
         g.lite = request.cookies.get("lite") == "1"
 
-        if request.method == "POST" and not app.config.get("TESTING_NO_CSRF"):
+        if request.method == "POST":
             token = request.form.get("csrf") or request.headers.get("X-CSRF-Token")
             if not token or token != session.get("csrf"):
                 abort(400, "Неверный CSRF-токен. Обнови страницу.")
@@ -243,6 +401,7 @@ def register_routes(app):
             "csrf": session["csrf"],
             "lite": g.lite,
             "unread": unread_count(g.user) if g.user else 0,
+            "unseen": unseen_notifications(g.user) if g.user else 0,
             "is_following": is_following,
             "in_circle": in_circle,
         }
@@ -260,7 +419,12 @@ def register_routes(app):
             return f"{seconds // 86400} дн назад"
         return value.strftime("%d.%m.%Y")
 
-    # ---------- PWA ----------
+    @app.template_filter("iso")
+    def iso(value):
+        # Время в базе в UTC, браузер переведёт в местное
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ---------- PWA И СЛУЖЕБНОЕ ----------
 
     @app.route("/sw.js")
     def service_worker():
@@ -283,6 +447,18 @@ def register_routes(app):
         response.set_cookie(
             "lite", "0" if g.lite else "1", max_age=60 * 60 * 24 * 365, samesite="Lax"
         )
+        return response
+
+    @app.route("/img/<int:image_id>")
+    def image(image_id):
+        picture = db.session.get(Image, image_id) or abort(404)
+        # Картинка закрытого или отложенного поста доступна только тем, кто видит пост
+        post = Post.query.filter_by(image_id=picture.id).first()
+        if post and not can_see(g.user, post):
+            abort(404)
+        response = Response(picture.data, mimetype=picture.mime)
+        cache = "private" if post and post.visibility == "circle" else "public"
+        response.headers["Cache-Control"] = f"{cache}, max-age=31536000, immutable"
         return response
 
     # ---------- ВХОД И РЕГИСТРАЦИЯ ----------
@@ -361,11 +537,22 @@ def register_routes(app):
 
     # ---------- ЛЕНТА И ПОСТЫ ----------
 
+    def after_cursor(query, before_id):
+        """Пагинация: посты, которые в ленте идут после поста before_id."""
+        anchor = db.session.get(Post, before_id) if before_id else None
+        if anchor is None:
+            return query
+        return query.filter(
+            or_(
+                Post.published_at < anchor.published_at,
+                and_(Post.published_at == anchor.published_at, Post.id < anchor.id),
+            )
+        )
+
     @app.route("/feed")
     @login_required
     def feed():
         tab = request.args.get("tab", "following")
-        before = request.args.get("before", type=int)
 
         query = visible_posts_query(g.user)
         if tab == "following":
@@ -375,10 +562,9 @@ def register_routes(app):
             query = query.filter(
                 or_(Post.author_id.in_(followed), Post.author_id == g.user.id)
             )
-        if before:
-            query = query.filter(Post.id < before)
+        query = after_cursor(query, request.args.get("before", type=int))
 
-        posts = query.order_by(Post.id.desc()).limit(FEED_PAGE_SIZE + 1).all()
+        posts = newest_first(query).limit(FEED_PAGE_SIZE + 1).all()
         has_more = len(posts) > FEED_PAGE_SIZE
         posts = posts[:FEED_PAGE_SIZE]
 
@@ -398,18 +584,45 @@ def register_routes(app):
     @app.route("/post/new", methods=["POST"])
     @login_required
     def new_post():
-        text = request.form.get("text", "").strip()
+        back = request.referrer or url_for("feed")
+        text_value = request.form.get("text", "").strip()
         visibility = "circle" if request.form.get("visibility") == "circle" else "all"
+        photo = request.files.get("image")
 
-        if not text:
-            flash("Пост не может быть пустым.", "error")
-        elif len(text) > MAX_POST_LENGTH:
+        if len(text_value) > MAX_POST_LENGTH:
             flash(f"Пост слишком длинный (максимум {MAX_POST_LENGTH} символов).", "error")
+            return redirect(back)
+
+        published_at = now()
+        if request.form.get("publish_at"):
+            published_at = parse_local_datetime(
+                request.form["publish_at"], request.form.get("tz_offset")
+            )
+            if published_at is None or not (now() < published_at < now() + timedelta(days=365)):
+                flash("Время публикации должно быть в будущем, но не дальше чем через год.", "error")
+                return redirect(back)
+
+        image = None
+        if photo and photo.filename:
+            image = save_image(photo, g.user, POST_IMAGE_SIZE)
+            if image is None:
+                flash("Не получилось открыть фото. Подойдут JPG, PNG, WebP или GIF.", "error")
+                return redirect(back)
+
+        if not text_value and image is None:
+            flash("Напиши что-нибудь или прикрепи фото.", "error")
+            return redirect(back)
+
+        db.session.add(Post(
+            author_id=g.user.id, text=text_value, image=image,
+            visibility=visibility, published_at=published_at,
+        ))
+        db.session.commit()
+        if published_at > now():
+            flash("Пост запланирован. До публикации его видишь только ты.", "ok")
         else:
-            db.session.add(Post(author_id=g.user.id, text=text, visibility=visibility))
-            db.session.commit()
             flash("Пост опубликован!", "ok")
-        return redirect(request.referrer or url_for("feed"))
+        return redirect(back)
 
     def get_visible_post(post_id):
         post = db.session.get(Post, post_id)
@@ -430,13 +643,16 @@ def register_routes(app):
             abort(403)
 
         if request.method == "POST":
-            text = request.form.get("text", "").strip()
-            if not text or len(text) > MAX_POST_LENGTH:
+            text_value = request.form.get("text", "").strip()
+            if len(text_value) > MAX_POST_LENGTH or (not text_value and post.image is None):
                 flash("Текст поста пустой или слишком длинный.", "error")
                 return render_template("edit_post.html", post=post)
-            post.text = text
+            post.text = text_value
             post.visibility = "circle" if request.form.get("visibility") == "circle" else "all"
-            post.edited_at = now()
+            if request.form.get("publish_now") and post.is_scheduled:
+                post.published_at = now()
+            else:
+                post.edited_at = now()
             db.session.commit()
             flash("Пост изменён.", "ok")
             return redirect(url_for("view_post", post_id=post.id))
@@ -449,7 +665,10 @@ def register_routes(app):
         post = get_visible_post(post_id)
         if post.author_id != g.user.id:
             abort(403)
+        image = post.image
         db.session.delete(post)
+        if image:
+            db.session.delete(image)
         db.session.commit()
         flash("Пост удалён.", "ok")
         return redirect(url_for("profile", username=g.user.username))
@@ -461,8 +680,10 @@ def register_routes(app):
         like = db.session.get(Like, (g.user.id, post.id))
         if like:
             db.session.delete(like)
+            unnotify(post.author_id, "like", post.id)
         else:
             db.session.add(Like(user_id=g.user.id, post_id=post.id))
+            notify(post.author_id, "like", post.id)
         db.session.commit()
 
         if request.headers.get("Accept") == "application/json":
@@ -473,11 +694,12 @@ def register_routes(app):
     @login_required
     def comment_post(post_id):
         post = get_visible_post(post_id)
-        text = request.form.get("text", "").strip()
-        if not text or len(text) > MAX_COMMENT_LENGTH:
+        text_value = request.form.get("text", "").strip()
+        if not text_value or len(text_value) > MAX_COMMENT_LENGTH:
             flash("Комментарий пустой или слишком длинный.", "error")
         else:
-            db.session.add(Comment(post_id=post.id, author_id=g.user.id, text=text))
+            db.session.add(Comment(post_id=post.id, author_id=g.user.id, text=text_value))
+            notify(post.author_id, "comment", post.id)
             db.session.commit()
         return redirect(url_for("view_post", post_id=post.id) + "#comments")
 
@@ -498,14 +720,13 @@ def register_routes(app):
     @app.route("/u/<username>")
     def profile(username):
         user = find_user(username) or abort(404)
-        posts = (
-            visible_posts_query(g.user)
-            .filter(Post.author_id == user.id)
-            .order_by(Post.id.desc())
-            .all()
-        )
+        posts = newest_first(
+            visible_posts_query(g.user).filter(Post.author_id == user.id)
+        ).all()
         stats = {
-            "posts": Post.query.filter_by(author_id=user.id).count(),
+            "posts": Post.query.filter(
+                Post.author_id == user.id, Post.published_at <= now()
+            ).count(),
             "followers": Follow.query.filter_by(followed_id=user.id).count(),
             "following": Follow.query.filter_by(follower_id=user.id).count(),
         }
@@ -518,6 +739,22 @@ def register_routes(app):
     def settings():
         if request.method == "POST":
             g.user.bio = request.form.get("bio", "").strip()[:300]
+
+            photo = request.files.get("avatar")
+            if photo and photo.filename:
+                image = save_image(photo, g.user, AVATAR_SIZE, square=True)
+                if image is None:
+                    flash("Не получилось открыть фото. Подойдут JPG, PNG, WebP или GIF.", "error")
+                    return redirect(url_for("settings"))
+                old = db.session.get(Image, g.user.avatar_id) if g.user.avatar_id else None
+                g.user.avatar_id = image.id
+                if old:
+                    db.session.delete(old)
+            elif request.form.get("remove_avatar") and g.user.avatar_id:
+                old = db.session.get(Image, g.user.avatar_id)
+                g.user.avatar_id = None
+                db.session.delete(old)
+
             db.session.commit()
             flash("Профиль сохранён.", "ok")
             return redirect(url_for("profile", username=g.user.username))
@@ -537,8 +774,10 @@ def register_routes(app):
             existing = db.session.get(Follow, (g.user.id, user.id))
             if existing:
                 db.session.delete(existing)
+                unnotify(user.id, "follow")
             else:
                 db.session.add(Follow(follower_id=g.user.id, followed_id=user.id))
+                notify(user.id, "follow")
             db.session.commit()
         return redirect(request.referrer or url_for("profile", username=user.username))
 
@@ -557,6 +796,25 @@ def register_routes(app):
             db.session.commit()
         return redirect(request.referrer or url_for("profile", username=user.username))
 
+    # ---------- УВЕДОМЛЕНИЯ ----------
+
+    @app.route("/notifications")
+    @login_required
+    def notifications():
+        items = (
+            Notification.query.filter_by(user_id=g.user.id)
+            .order_by(Notification.id.desc()).limit(100).all()
+        )
+        fresh = {item.id for item in items if not item.is_read}
+        Notification.query.filter_by(user_id=g.user.id, is_read=False).update({"is_read": True})
+        db.session.commit()
+        return render_template("notifications.html", items=items, fresh=fresh)
+
+    @app.route("/api/counters")
+    @login_required
+    def counters():
+        return jsonify(messages=unread_count(g.user), notifications=unseen_notifications(g.user))
+
     # ---------- ПОИСК ----------
 
     @app.route("/search")
@@ -570,10 +828,9 @@ def register_routes(app):
                 User.query.filter(User.username.ilike(pattern))
                 .order_by(User.username).limit(20).all()
             )
-            posts = (
+            posts = newest_first(
                 visible_posts_query(g.user).filter(Post.text.ilike(pattern))
-                .order_by(Post.id.desc()).limit(30).all()
-            )
+            ).limit(30).all()
         return render_template(
             "search.html", q=q, users=users, posts=posts, liked=liked_ids(posts)
         )
@@ -599,12 +856,14 @@ def register_routes(app):
             "id": message.id,
             "mine": message.sender_id == g.user.id,
             "text": message.text,
-            "time": message.created_at.strftime("%H:%M"),
+            "time": iso(message.created_at),
+            "expires": iso(message.expires_at) if message.expires_at else None,
         }
 
     @app.route("/messages")
     @login_required
     def messages():
+        purge_expired_messages()
         return render_template("messages.html", dialogs=dialogs_for(g.user))
 
     @app.route("/messages/<username>", methods=["GET", "POST"])
@@ -615,9 +874,13 @@ def register_routes(app):
             return redirect(url_for("messages"))
 
         if request.method == "POST":
-            text = request.form.get("text", "").strip()
-            if text and len(text) <= MAX_MESSAGE_LENGTH:
-                message = Message(sender_id=g.user.id, receiver_id=other.id, text=text)
+            text_value = request.form.get("text", "").strip()
+            if text_value and len(text_value) <= MAX_MESSAGE_LENGTH:
+                timer = chat_timer(g.user, other)
+                message = Message(
+                    sender_id=g.user.id, receiver_id=other.id, text=text_value,
+                    expires_at=now() + timedelta(seconds=timer) if timer else None,
+                )
                 db.session.add(message)
                 db.session.commit()
                 if request.headers.get("Accept") == "application/json":
@@ -626,15 +889,45 @@ def register_routes(app):
                 return jsonify(error="Пустое или слишком длинное сообщение"), 400
             return redirect(url_for("chat", username=other.username))
 
+        purge_expired_messages()
         history = chat_query(g.user, other).order_by(Message.id).all()
         mark_read(g.user, other)
-        return render_template("chat.html", other=other, history=history)
+        return render_template(
+            "chat.html", other=other, history=history,
+            timer=chat_timer(g.user, other), timers=CHAT_TIMERS,
+        )
+
+    @app.route("/messages/<username>/timer", methods=["POST"])
+    @login_required
+    def set_chat_timer(username):
+        other = find_user(username) or abort(404)
+        seconds = request.form.get("seconds", 0, type=int)
+        if seconds not in CHAT_TIMERS or other.id == g.user.id:
+            abort(400, "Такого таймера нет.")
+
+        a, b = sorted((g.user.id, other.id))
+        timer = db.session.get(ChatTimer, (a, b))
+        if timer is None:
+            timer = ChatTimer(user_a_id=a, user_b_id=b)
+            db.session.add(timer)
+        timer.seconds = seconds
+
+        # Сообщение в чате, чтобы собеседник тоже увидел, что таймер поменялся
+        label = "выключены" if seconds == 0 else f"исчезают через {CHAT_TIMERS[seconds]}"
+        db.session.add(Message(
+            sender_id=g.user.id, receiver_id=other.id,
+            text=f"🕒 Сообщения в этом чате теперь {label}",
+            expires_at=now() + timedelta(seconds=seconds) if seconds else None,
+        ))
+        db.session.commit()
+        return redirect(url_for("chat", username=other.username))
 
     @app.route("/api/messages/<username>")
     @login_required
     def new_messages(username):
         other = find_user(username) or abort(404)
         after = request.args.get("after", 0, type=int)
+        purge_expired_messages()
         history = chat_query(g.user, other).filter(Message.id > after).order_by(Message.id).all()
         if history:
             mark_read(g.user, other)
@@ -651,6 +944,11 @@ def register_routes(app):
     @app.errorhandler(400)
     def bad_request(error):
         return render_template("error.html", code=400, text=error.description), 400
+
+    @app.errorhandler(413)
+    def too_large(error):
+        flash("Файл слишком большой — максимум 10 МБ.", "error")
+        return redirect(request.referrer or url_for("feed"))
 
 
 app = create_app()

@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ user.username }} · NOWA{% endblock %}
 {% block content %}
+{% from "_macros.html" import avatar with context %}
 <section class="card profile">
-    <span class="avatar big">{{ user.username[0]|upper }}</span>
+    {{ avatar(user, 'big') }}
     <h2>{{ user.username }}</h2>
     {% if user.bio %}<p>{{ user.bio }}</p>{% endif %}
     <div class="stats">

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Уведомления · NOWA{% endblock %}
+{% block content %}
+{% from "_macros.html" import avatar with context %}
+<section class="card">
+    <h3>Уведомления</h3>
+    {% for item in items %}
+        <div class="notification {% if item.id in fresh %}fresh{% endif %}">
+            <a href="{{ url_for('profile', username=item.actor.username) }}">{{ avatar(item.actor) }}</a>
+            <div class="notification-body">
+                <a class="author" href="{{ url_for('profile', username=item.actor.username) }}">{{ item.actor.username }}</a>
+                {% if item.kind == 'like' %}
+                    оценил(а) твой <a href="{{ url_for('view_post', post_id=item.post_id) }}">пост</a> ❤️
+                {% elif item.kind == 'comment' %}
+                    прокомментировал(а) твой <a href="{{ url_for('view_post', post_id=item.post_id) }}#comments">пост</a> 💬
+                {% elif item.kind == 'follow' %}
+                    подписался(ась) на тебя 👋
+                {% endif %}
+                {% if item.post and item.post.text %}<div class="muted quote">«{{ item.post.text|truncate(80) }}»</div>{% endif %}
+                <div class="muted">{{ item.created_at|ago }}</div>
+            </div>
+        </div>
+    {% else %}
+        <p class="muted">Пока тихо. Здесь появятся лайки, комментарии и новые подписчики.</p>
+    {% endfor %}
+</section>
+{% endblock %}

@@ -11,7 +11,7 @@
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body class="{% if lite %}lite{% endif %}">
+<body class="{% if lite %}lite{% endif %}" data-poll="{{ '1' if me and not lite else '0' }}">
 
 {% if me %}
 <nav class="nav">
@@ -22,7 +22,10 @@
         <span class="ico">🔍</span><span class="label">Поиск</span></a>
     <a href="{{ url_for('messages') }}" class="{% if request.endpoint in ('messages', 'chat') %}active{% endif %}">
         <span class="ico">💬</span><span class="label">Сообщения</span>
-        {% if unread %}<span class="badge">{{ unread }}</span>{% endif %}</a>
+        <span class="badge" data-counter="messages" {% if not unread %}hidden{% endif %}>{{ unread }}</span></a>
+    <a href="{{ url_for('notifications') }}" class="{% if request.endpoint == 'notifications' %}active{% endif %}">
+        <span class="ico">🔔</span><span class="label">Уведомления</span>
+        <span class="badge" data-counter="notifications" {% if not unseen %}hidden{% endif %}>{{ unseen }}</span></a>
     <a href="{{ url_for('profile', username=me.username) }}" class="{% if request.endpoint in ('profile', 'settings') %}active{% endif %}">
         <span class="ico">👤</span><span class="label">Профиль</span></a>
     <div class="nav-extra">

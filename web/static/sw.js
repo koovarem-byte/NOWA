@@ -1,6 +1,6 @@
 // Service worker NOWA: кэширует оформление, чтобы приложение открывалось быстро
 // даже на плохом интернете, и показывает страницу «нет сети», если связи нет совсем.
-const CACHE = "nowa-v1";
+const CACHE = "nowa-v3";
 const SHELL = ["/static/style.css", "/static/app.js", "/static/icon.svg", "/offline"];
 
 self.addEventListener("install", (event) => {

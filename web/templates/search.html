@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Поиск · NOWA{% endblock %}
 {% block content %}
+{% from "_macros.html" import avatar with context %}
 <form class="card row" method="get">
     <input name="q" value="{{ q }}" placeholder="Люди и посты…" autofocus>
     <button class="btn">🔍</button>
@@ -12,7 +13,7 @@
         {% for user in users %}
             <div class="user-row">
                 <a class="author" href="{{ url_for('profile', username=user.username) }}">
-                    <span class="avatar">{{ user.username[0]|upper }}</span>{{ user.username }}</a>
+                    {{ avatar(user) }}{{ user.username }}</a>
             </div>
         {% else %}
             <p class="muted">Никого не нашли.</p>

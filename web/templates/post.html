@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Пост {{ post.author.username }} · NOWA{% endblock %}
 {% block content %}
+{% from "_macros.html" import avatar with context %}
 {% include "_post.html" %}
 
 <section class="card" id="comments">
     <h3>Обсуждение</h3>
     {% for comment in post.comments %}
         <div class="comment">
-            <a class="author" href="{{ url_for('profile', username=comment.author.username) }}">{{ comment.author.username }}</a>
+            <a class="author" href="{{ url_for('profile', username=comment.author.username) }}">{{ avatar(comment.author, 'small') }}{{ comment.author.username }}</a>
             <span class="muted">{{ comment.created_at|ago }}</span>
             {% if me and me.id in (comment.author_id, post.author_id) %}
                 <form method="post" action="{{ url_for('delete_comment', comment_id=comment.id) }}" class="inline">
