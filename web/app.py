@@ -10,11 +10,12 @@
 import io
 import os
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import (
-    Flask, Response, abort, flash, g, jsonify, redirect, render_template,
+    Flask, Response, abort, current_app, flash, g, jsonify, redirect, render_template,
     request, session, url_for, send_from_directory,
 )
 from flask_sqlalchemy import SQLAlchemy
@@ -23,6 +24,8 @@ from sqlalchemy import and_, inspect, or_, text
 from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
+
+import webpush
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -286,6 +289,17 @@ class Answer(db.Model):
     __table_args__ = (db.UniqueConstraint("user_id", "day"),)
 
 
+class PushSubscription(db.Model):
+    """Подписка браузера на пуш-уведомления. У одного человека их может быть несколько
+    (телефон, ноутбук)."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    endpoint = db.Column(db.Text, nullable=False, unique=True)
+    p256dh = db.Column(db.String(200), nullable=False)
+    auth = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=now)
+
+
 class Block(db.Model):
     """blocker больше не видит blocked и наоборот; писать и звать друг друга нельзя."""
     blocker_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
@@ -456,6 +470,32 @@ def notify(user_id, kind, post_id=None, beacon_id=None, actor=None):
     ))
 
 
+def push(user_id, title, body, url, tag=None):
+    """Ставит пуш в очередь. Отправим после ответа на запрос, чтобы не тормозить страницу."""
+    if g.get("user") is not None and user_id == g.user.id:
+        return
+    if not hasattr(g, "push_queue"):
+        g.push_queue = []
+    g.push_queue.append((user_id, {"title": title, "body": body, "url": url, "tag": tag or url}))
+
+
+def deliver_pushes(app, queue):
+    """Работает в отдельном потоке: шифрует и отправляет пуши, удаляет мёртвые подписки."""
+    with app.app_context():
+        key = app.config["VAPID_KEY"]
+        subject = app.config["VAPID_SUBJECT"]
+        for user_id, message in queue:
+            for sub in PushSubscription.query.filter_by(user_id=user_id).all():
+                status = app.config["PUSH_SENDER"](
+                    {"endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth},
+                    message, key, subject,
+                )
+                if status in (404, 410):
+                    db.session.delete(sub)
+        db.session.commit()
+        db.session.remove()
+
+
 def unnotify(user_id, kind, post_id=None):
     Notification.query.filter_by(
         user_id=user_id, actor_id=g.user.id, kind=kind, post_id=post_id
@@ -537,6 +577,9 @@ def join_beacon(user, beacon):
         return
     db.session.add(BeaconMember(beacon_id=beacon.id, user_id=user.id))
     notify(beacon.author_id, "beacon_join", beacon_id=beacon.id, actor=user)
+    push(beacon.author_id, f"🙋 {user.username} в деле!",
+         f"Идёт на твой маяк {beacon.emoji} {beacon.label}",
+         url_for("beacon_page", token=beacon.token))
 
 
 # ---------- Вопрос дня ----------
@@ -656,6 +699,13 @@ def create_app(config=None):
         SESSION_COOKIE_SECURE=os.environ.get("NOWA_HTTPS") == "1",
         PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30,
     )
+    app.config["VAPID_KEY"] = webpush.load_vapid_key(
+        os.environ.get("VAPID_PRIVATE_KEY") or load_dev_vapid(app.instance_path)
+    )
+    app.config["VAPID_SUBJECT"] = os.environ.get("VAPID_SUBJECT", "mailto:admin@nowa.app")
+    app.config["PUSH_SENDER"] = webpush.send
+    app.config["PUSH_IN_BACKGROUND"] = True
+
     if config:
         app.config.update(config)
 
@@ -669,6 +719,18 @@ def create_app(config=None):
 
     register_routes(app)
     return app
+
+
+def load_dev_vapid(instance_path):
+    """Ключ для пушей при локальной разработке. На сервере задай VAPID_PRIVATE_KEY,
+    иначе после перезапуска все подписки на уведомления перестанут работать."""
+    os.makedirs(instance_path, exist_ok=True)
+    path = os.path.join(instance_path, "vapid_key")
+    if not os.path.exists(path):
+        with open(path, "w") as file:
+            file.write(webpush.generate_vapid_key())
+    with open(path) as file:
+        return file.read().strip()
 
 
 def load_dev_secret(instance_path):
@@ -694,6 +756,17 @@ def register_routes(app):
             token = request.form.get("csrf") or request.headers.get("X-CSRF-Token")
             if not token or token != session.get("csrf"):
                 abort(400, "Неверный CSRF-токен. Обнови страницу.")
+
+    @app.after_request
+    def send_queued_pushes(response):
+        queue = g.pop("push_queue", None)
+        if queue and response.status_code < 400:
+            app_object = current_app._get_current_object()
+            if app.config["PUSH_IN_BACKGROUND"]:
+                threading.Thread(target=deliver_pushes, args=(app_object, queue), daemon=True).start()
+            else:
+                deliver_pushes(app_object, queue)
+        return response
 
     @app.context_processor
     def inject_globals():
@@ -807,6 +880,9 @@ def register_routes(app):
                 user.invited_by_id = inviter.id
                 make_friends(user, inviter)
                 notify(inviter.id, "invite", actor=user)
+                push(inviter.id, "🎉 Новый друг в NOWA",
+                     f"{user.username} пришёл(ла) по твоему приглашению",
+                     url_for("profile", username=user.username))
             db.session.commit()
 
             flash(f"Добро пожаловать в NOWA, {username}!", "ok")
@@ -1129,6 +1205,38 @@ def register_routes(app):
             db.session.commit()
         return redirect(request.referrer or url_for("profile", username=user.username))
 
+    # ---------- ПУШ-УВЕДОМЛЕНИЯ ----------
+
+    @app.route("/push/key")
+    def push_key():
+        return jsonify(key=webpush.vapid_public_key(app.config["VAPID_KEY"]))
+
+    @app.route("/push/subscribe", methods=["POST"])
+    @login_required
+    def push_subscribe():
+        data = request.get_json(silent=True) or {}
+        endpoint = data.get("endpoint", "")
+        keys = data.get("keys") or {}
+        if not endpoint.startswith("https://") or not keys.get("p256dh") or not keys.get("auth"):
+            abort(400, "Неверная подписка.")
+        sub = PushSubscription.query.filter_by(endpoint=endpoint).first()
+        if sub is None:
+            sub = PushSubscription(endpoint=endpoint)
+            db.session.add(sub)
+        sub.user_id = g.user.id
+        sub.p256dh = keys["p256dh"][:200]
+        sub.auth = keys["auth"][:100]
+        db.session.commit()
+        return jsonify(ok=True)
+
+    @app.route("/push/unsubscribe", methods=["POST"])
+    @login_required
+    def push_unsubscribe():
+        endpoint = (request.get_json(silent=True) or {}).get("endpoint", "")
+        PushSubscription.query.filter_by(endpoint=endpoint, user_id=g.user.id).delete()
+        db.session.commit()
+        return jsonify(ok=True)
+
     # ---------- БЕЗОПАСНОСТЬ ----------
 
     @app.route("/u/<username>/block", methods=["POST"])
@@ -1300,8 +1408,12 @@ def register_routes(app):
             )
             db.session.add(beacon)
             db.session.flush()
+            beacon_url = url_for("beacon_page", token=beacon.token)
             for user_id in beacon_audience_ids(beacon):
-                notify(user_id, "beacon", beacon_id=beacon.id)
+                if not is_blocked_between(user_id, g.user.id):
+                    notify(user_id, "beacon", beacon_id=beacon.id)
+                    push(user_id, f"🔆 {g.user.username} зажёг маяк",
+                         f"{beacon.emoji} {beacon.label} — жми «Я в деле»", beacon_url)
             db.session.commit()
             flash("Маяк зажжён! Друзья его видят. Можешь отправить ссылку кому угодно.", "ok")
             return redirect(url_for("beacon_page", token=beacon.token))
@@ -1374,6 +1486,10 @@ def register_routes(app):
         message = BeaconMessage(beacon_id=beacon.id, user_id=g.user.id, text=text_value)
         db.session.add(message)
         db.session.commit()
+        beacon_url = url_for("beacon_page", token=beacon.token) + "#chat"
+        for user_id in [beacon.author_id] + [m.user_id for m in beacon.members]:
+            push(user_id, f"{beacon.emoji} {beacon.label}", f"{g.user.username}: {text_value[:120]}",
+                 beacon_url, tag=f"beacon-{beacon.id}")
         if wants_json:
             return jsonify(beacon_message_json(message))
         return redirect(url_for("beacon_page", token=beacon.token) + "#chat")
@@ -1483,6 +1599,9 @@ def register_routes(app):
                 )
                 db.session.add(message)
                 db.session.commit()
+                push(other.id, f"✉️ {g.user.username}",
+                     "Исчезающее сообщение" if timer else text_value[:120],
+                     url_for("chat", username=g.user.username), tag=f"dm-{g.user.id}")
                 if request.headers.get("Accept") == "application/json":
                     return jsonify(message_json(message))
             elif request.headers.get("Accept") == "application/json":

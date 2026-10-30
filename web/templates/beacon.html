@@ -52,6 +52,13 @@
             {% endif %}
         {% endif %}
     </div>
+    {% if me and me.id == beacon.author_id %}
+        <div class="push-cta">
+            <p class="muted small">Чтобы сразу узнать, кто идёт, включи уведомления:</p>
+            <button type="button" class="btn ghost push-toggle">🔔 Включить уведомления</button>
+            <p class="muted small push-hint" hidden></p>
+        </div>
+    {% endif %}
     {% if me and me.id != beacon.author_id %}
         <div class="safety center">{{ report_form(reasons, beacon_token=beacon.token) }}</div>
     {% endif %}

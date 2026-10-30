@@ -2,7 +2,7 @@
 // 1. Оформление берём из кэша — приложение открывается быстро даже на плохом интернете.
 // 2. Открытые страницы сохраняем — без сети их можно перечитать.
 // 3. Если страницы нет в кэше и сети нет — показываем «нет сети».
-const CACHE = "nowa-v5";
+const CACHE = "nowa-v7";
 const PAGES = "nowa-pages-v1";
 const MAX_PAGES = 40;
 const SHELL = ["/static/style.css", "/static/app.js", "/static/icon.svg", "/offline"];
@@ -64,4 +64,34 @@ self.addEventListener("fetch", (event) => {
                 .catch(async () => (await caches.match(request, { cacheName: PAGES })) || caches.match("/offline"))
         );
     }
+});
+
+// ---------- Пуш-уведомления ----------
+
+self.addEventListener("push", (event) => {
+    let data = {};
+    try { data = event.data ? event.data.json() : {}; } catch (error) { data = { body: event.data.text() }; }
+    event.waitUntil(
+        self.registration.showNotification(data.title || "NOWA", {
+            body: data.body || "",
+            icon: "/static/icon-192.png",
+            badge: "/static/icon-192.png",
+            tag: data.tag,
+            renotify: Boolean(data.tag),
+            data: { url: data.url || "/feed" },
+        })
+    );
+});
+
+self.addEventListener("notificationclick", (event) => {
+    event.notification.close();
+    const url = new URL(event.notification.data.url, self.location.origin).href;
+    event.waitUntil(
+        self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+            for (const client of windows) {
+                if (client.url === url && "focus" in client) return client.focus();
+            }
+            return self.clients.openWindow(url);
+        })
+    );
 });

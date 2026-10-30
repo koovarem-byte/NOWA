@@ -139,7 +139,7 @@ input, textarea {
     resize: vertical;
 }
 
-input[type=checkbox] { width: auto; vertical-align: middle; }
+input[type=checkbox], input[type=radio] { width: auto; vertical-align: middle; }
 input:focus, textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
 
 label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 14px; }
@@ -505,3 +505,5 @@ body.offline::before {
 .report-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .report-item p { margin-bottom: 4px; }
 .report-item blockquote { border-left: 3px solid var(--line); padding-left: 10px; margin: 8px 0; white-space: pre-wrap; }
+.push-cta { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.push-toggle:disabled { opacity: .6; cursor: default; }

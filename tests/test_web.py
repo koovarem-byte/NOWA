@@ -13,7 +13,16 @@ from app import create_app, db  # noqa: E402
 def app(tmp_path):
     # TEST_DATABASE_URL=postgresql://... — прогнать тесты на PostgreSQL, как на сервере
     url = os.environ.get("TEST_DATABASE_URL") or "sqlite:///" + str(tmp_path / "test.db")
-    app = create_app({"SQLALCHEMY_DATABASE_URI": url})
+    sent = []
+
+    def fake_sender(subscription, message, key, subject):
+        sent.append((subscription["endpoint"], message))
+        return 410 if "dead" in subscription["endpoint"] else 201
+
+    app = create_app({
+        "SQLALCHEMY_DATABASE_URI": url, "PUSH_IN_BACKGROUND": False, "PUSH_SENDER": fake_sender,
+    })
+    app.sent_pushes = sent
     with app.app_context():
         db.drop_all()
         db.create_all()
@@ -704,3 +713,129 @@ def test_report_with_block(app):
     post(artem, "/report", username="bob", reason="danger", also_block="1")
     assert artem.get("/u/bob").get_data(as_text=True).count("Разблокировать") == 1
     assert artem.post("/report", data={"username": "artem", "csrf": csrf_of(artem)}).status_code == 400
+
+
+# ---------------- Пуш-уведомления ----------------
+
+def subscribe_push(client, endpoint):
+    return client.post("/push/subscribe", json={
+        "endpoint": endpoint, "keys": {"p256dh": "key", "auth": "secret"},
+    }, headers={"X-CSRF-Token": csrf_of(client)})
+
+
+def test_push_on_beacon_join_and_messages(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    make_friends_via_follow(artem, bob, "artem", "bob")
+    assert subscribe_push(artem, "https://push.example/artem").status_code == 200
+    assert subscribe_push(bob, "https://push.example/bob").status_code == 200
+    # Без CSRF подписаться нельзя
+    assert bob.post("/push/subscribe", json={}).status_code == 400
+
+    light_beacon(artem, title="кофе")
+    assert [(e, m["title"]) for e, m in app.sent_pushes] == [
+        ("https://push.example/bob", "🔆 artem зажёг маяк")]
+    app.sent_pushes.clear()
+
+    token = beacon_token(app)
+    post(bob, f"/b/{token}/join")
+    assert app.sent_pushes[0][0] == "https://push.example/artem"
+    assert "bob в деле" in app.sent_pushes[0][1]["title"]
+    assert app.sent_pushes[0][1]["url"] == f"/b/{token}"
+    app.sent_pushes.clear()
+
+    post(bob, f"/b/{token}/chat", text="бегу")
+    assert [e for e, _ in app.sent_pushes] == ["https://push.example/artem"]
+    app.sent_pushes.clear()
+
+    post(artem, "/messages/bob", text="привет")
+    assert app.sent_pushes == [("https://push.example/bob", {
+        "title": "✉️ artem", "body": "привет", "url": "/messages/artem", "tag": "dm-1"})]
+
+
+def test_dead_push_subscription_is_removed(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    subscribe_push(bob, "https://push.example/dead")
+    post(artem, "/messages/bob", text="привет")
+    from app import PushSubscription
+    with app.app_context():
+        assert PushSubscription.query.count() == 0
+
+
+def test_push_unsubscribe(app):
+    bob = app.test_client()
+    register(bob, "bob")
+    subscribe_push(bob, "https://push.example/bob")
+    bob.post("/push/unsubscribe", json={"endpoint": "https://push.example/bob"},
+             headers={"X-CSRF-Token": csrf_of(bob)})
+    from app import PushSubscription
+    with app.app_context():
+        assert PushSubscription.query.count() == 0
+
+
+def test_webpush_encryption_and_vapid(monkeypatch):
+    """Шифруем как сервер, расшифровываем как браузер; проверяем подпись VAPID."""
+    import base64
+    import json
+    import webpush
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    browser_key = ec.generate_private_key(ec.SECP256R1())
+    auth = webpush.b64url(os.urandom(16))
+    subscription = {
+        "endpoint": "https://fcm.googleapis.com/fcm/send/abc",
+        "p256dh": webpush.b64url(webpush.public_bytes(browser_key)),
+        "auth": auth,
+    }
+    captured = {}
+
+    class FakeResponse:
+        status = 201
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        return FakeResponse()
+
+    monkeypatch.setattr(webpush.urllib.request, "urlopen", fake_urlopen)
+    server_key = webpush.load_vapid_key(webpush.generate_vapid_key())
+    message = {"title": "🔆 artem зажёг маяк", "body": "☕ Кофе", "url": "/b/x"}
+    assert webpush.send(subscription, message, server_key, "mailto:a@b.c") == 201
+
+    request = captured["request"]
+    assert json.loads(webpush.decrypt(request.data, browser_key, auth)) == message
+    assert request.get_header("Content-encoding") == "aes128gcm"
+
+    token = request.get_header("Authorization").split("t=")[1].split(",")[0]
+    header, claims, signature = token.split(".")
+    assert json.loads(webpush.b64url_decode(claims))["aud"] == "https://fcm.googleapis.com"
+    raw = webpush.b64url_decode(signature)
+    der = encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+    server_key.public_key().verify(der, f"{header}.{claims}".encode(), ec.ECDSA(hashes.SHA256()))
+
+
+def test_webpush_rfc8291_vector():
+    """Официальный пример из RFC 8291, раздел 5."""
+    import webpush
+    from cryptography.hazmat.primitives.asymmetric import ec
+    as_key = ec.derive_private_key(int.from_bytes(webpush.b64url_decode(
+        "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"), "big"), ec.SECP256R1())
+    body = webpush.encrypt(
+        b"When I grow up, I want to be a watermelon",
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+        "BTBZMqHH6r4Tts7J_aSIgg",
+        salt=webpush.b64url_decode("DGv6ra1nlYgDCS1FRnbzlw"), server_key=as_key,
+    )
+    assert webpush.b64url(body) == (
+        "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLo"
+        "cInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLV"
+        "WGNWQexSgSxsj_Qulcy4a-fN"
+    )

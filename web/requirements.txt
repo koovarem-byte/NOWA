@@ -3,3 +3,4 @@ Flask-SQLAlchemy==3.1.1
 gunicorn==23.0.0
 psycopg[binary]==3.3.6
 Pillow==12.3.0
+cryptography==50.0.1

@@ -308,3 +308,85 @@ if (chat) {
         setTimeout(poll, 3000);
     }
 }
+
+// ---------- Пуш-уведомления: включение по кнопке ----------
+
+const pushButtons = document.querySelectorAll(".push-toggle");
+if (pushButtons.length) {
+    const supported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+
+    const setState = (text, disabled = false) => pushButtons.forEach((button) => {
+        button.textContent = text;
+        button.disabled = disabled;
+    });
+    const hint = (text) => document.querySelectorAll(".push-hint").forEach((element) => {
+        element.textContent = text;
+        element.hidden = !text;
+    });
+
+    const toKey = (base64) => {
+        const raw = atob((base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+        return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+    };
+
+    const saveSubscription = (subscription) => fetch("/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        body: JSON.stringify(subscription),
+    });
+
+    const refresh = async () => {
+        if (!supported) {
+            setState("Недоступно в этом браузере", true);
+            hint(isIOS && !standalone
+                ? "На iPhone: нажми «Поделиться» → «На экран „Домой“», открой NOWA с экрана и включи уведомления там."
+                : "Попробуй открыть NOWA в Chrome, Яндекс Браузере или Safari.");
+            return null;
+        }
+        if (Notification.permission === "denied") {
+            setState("Запрещены в настройках браузера", true);
+            hint("Разреши уведомления для этого сайта в настройках браузера.");
+            return null;
+        }
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription) {
+            saveSubscription(subscription);  // напоминаем серверу — вдруг он её забыл
+            setState("🔔 Уведомления включены · выключить");
+        } else {
+            setState("🔔 Включить уведомления на этом устройстве");
+        }
+        hint("");
+        return subscription;
+    };
+
+    pushButtons.forEach((button) => button.addEventListener("click", async () => {
+        const registration = await navigator.serviceWorker.ready;
+        const current = await registration.pushManager.getSubscription();
+        try {
+            if (current) {
+                await fetch("/push/unsubscribe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+                    body: JSON.stringify({ endpoint: current.endpoint }),
+                });
+                await current.unsubscribe();
+            } else {
+                if (await Notification.requestPermission() !== "granted") return refresh();
+                const { key } = await (await fetch("/push/key")).json();
+                const subscription = await registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: toKey(key),
+                });
+                await saveSubscription(subscription);
+            }
+        } catch (error) {
+            hint("Не получилось включить уведомления. Попробуй ещё раз чуть позже.");
+        }
+        refresh();
+    }));
+
+    refresh();
+}
