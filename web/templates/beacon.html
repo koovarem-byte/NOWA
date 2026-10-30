@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import avatar with context %}
+{% from "_macros.html" import avatar, report_form with context %}
 {% block title %}{{ beacon.emoji }} {{ beacon.label }} · {{ beacon.author.username }} · NOWA{% endblock %}
 {% block head %}
     <meta property="og:title" content="{{ beacon.author.username }} зажёг маяк: {{ beacon.emoji }} {{ beacon.label }}">
@@ -52,6 +52,9 @@
             {% endif %}
         {% endif %}
     </div>
+    {% if me and me.id != beacon.author_id %}
+        <div class="safety center">{{ report_form(reasons, beacon_token=beacon.token) }}</div>
+    {% endif %}
     {% if not me %}
         <p class="muted small">NOWA — соцсеть для своих. Без VPN, без установки, без номера телефона.</p>
     {% endif %}

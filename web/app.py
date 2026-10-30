@@ -286,6 +286,40 @@ class Answer(db.Model):
     __table_args__ = (db.UniqueConstraint("user_id", "day"),)
 
 
+class Block(db.Model):
+    """blocker больше не видит blocked и наоборот; писать и звать друг друга нельзя."""
+    blocker_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    blocked_id = db.Column(db.Integer, db.ForeignKey("user.id"), primary_key=True)
+    created_at = db.Column(db.DateTime, default=now)
+
+
+class Report(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    reporter_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    target_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey("post.id", ondelete="SET NULL"))
+    beacon_id = db.Column(db.Integer, db.ForeignKey("beacon.id", ondelete="SET NULL"))
+    reason = db.Column(db.String(30), nullable=False)
+    comment = db.Column(db.String(500), nullable=False, default="")
+    created_at = db.Column(db.DateTime, default=now)
+    resolved = db.Column(db.Boolean, default=False, nullable=False)
+
+    reporter = db.relationship("User", foreign_keys=[reporter_id])
+    target = db.relationship("User", foreign_keys=[target_user_id])
+    post = db.relationship("Post", backref=db.backref("reports", passive_deletes=True))
+    beacon = db.relationship("Beacon", backref=db.backref("reports", passive_deletes=True))
+
+
+REPORT_REASONS = {
+    "spam": "Спам или реклама",
+    "abuse": "Оскорбления или травля",
+    "danger": "Угрозы или опасная встреча",
+    "nsfw": "Неприемлемый контент",
+    "fake": "Выдаёт себя за другого",
+    "other": "Другое",
+}
+
+
 class Notification(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
@@ -330,6 +364,21 @@ def in_circle(owner, member):
     return db.session.get(CircleMember, (owner.id, member.id)) is not None
 
 
+def blocked_ids(user):
+    """Все, с кем у user блокировка в любую сторону."""
+    if user is None:
+        return []
+    rows = Block.query.filter(or_(Block.blocker_id == user.id, Block.blocked_id == user.id))
+    return [row.blocked_id if row.blocker_id == user.id else row.blocker_id for row in rows]
+
+
+def is_blocked_between(a_id, b_id):
+    return Block.query.filter(or_(
+        and_(Block.blocker_id == a_id, Block.blocked_id == b_id),
+        and_(Block.blocker_id == b_id, Block.blocked_id == a_id),
+    )).first() is not None
+
+
 def visible_posts_query(viewer):
     """Посты, которые viewer имеет право видеть. Свои отложенные посты автор видит сразу."""
     published = Post.published_at <= now()
@@ -340,6 +389,7 @@ def visible_posts_query(viewer):
         CircleMember.member_id == viewer.id
     )
     return Post.query.filter(
+        Post.author_id.not_in(blocked_ids(viewer)),
         or_(
             Post.author_id == viewer.id,
             and_(
@@ -357,6 +407,8 @@ def newest_first(query):
 def can_see(viewer, post):
     if viewer is not None and post.author_id == viewer.id:
         return True
+    if viewer is not None and is_blocked_between(viewer.id, post.author_id):
+        return False
     if post.is_scheduled:
         return False
     if post.visibility == "all":
@@ -397,7 +449,7 @@ def save_image(file, owner, size, square=False):
 
 def notify(user_id, kind, post_id=None, beacon_id=None, actor=None):
     actor = actor or g.user
-    if user_id == actor.id:
+    if user_id == actor.id or is_blocked_between(user_id, actor.id):
         return
     db.session.add(Notification(
         user_id=user_id, actor_id=actor.id, kind=kind, post_id=post_id, beacon_id=beacon_id,
@@ -412,9 +464,24 @@ def unnotify(user_id, kind, post_id=None):
 
 def make_friends(a, b):
     """Взаимная подписка — так новичок, пришедший по приглашению, сразу не один."""
+    if is_blocked_between(a.id, b.id):
+        return
     for follower, followed in ((a, b), (b, a)):
         if follower.id != followed.id and not db.session.get(Follow, (follower.id, followed.id)):
             db.session.add(Follow(follower_id=follower.id, followed_id=followed.id))
+
+
+def block_user(blocker, blocked):
+    """Блокировка рвёт все связи: подписки, близкий круг, участие в маяках друг друга."""
+    db.session.add(Block(blocker_id=blocker.id, blocked_id=blocked.id))
+    for a, b in ((blocker, blocked), (blocked, blocker)):
+        Follow.query.filter_by(follower_id=a.id, followed_id=b.id).delete()
+        CircleMember.query.filter_by(owner_id=a.id, member_id=b.id).delete()
+        their_beacons = db.session.query(Beacon.id).filter(Beacon.author_id == a.id)
+        BeaconMember.query.filter(
+            BeaconMember.user_id == b.id, BeaconMember.beacon_id.in_(their_beacons)
+        ).delete(synchronize_session=False)
+        Notification.query.filter_by(user_id=a.id, actor_id=b.id).delete()
 
 
 def mutual_friend_ids(user):
@@ -433,20 +500,6 @@ def purge_expired_beacons():
     db.session.commit()
 
 
-def can_see_beacon(user, beacon):
-    """Видеть маяк в ленте может автор, участник, взаимный друг или близкий круг —
-    в зависимости от того, кому автор его зажёг. По ссылке — любой, у кого она есть."""
-    if user is None:
-        return False
-    if beacon.author_id == user.id or beacon.has_member(user):
-        return True
-    if beacon.audience == "circle":
-        return in_circle(beacon.author, user)
-    return (
-        is_following(beacon.author, user) and is_following(user, beacon.author)
-    )
-
-
 def beacons_for(user):
     """Активные маяки, которые user видит в полосе «Сейчас»."""
     joined = db.session.query(BeaconMember.beacon_id).filter(BeaconMember.user_id == user.id)
@@ -454,6 +507,7 @@ def beacons_for(user):
     return (
         Beacon.query.filter(
             Beacon.expires_at > now(),
+            Beacon.author_id.not_in(blocked_ids(user)),
             or_(
                 Beacon.author_id == user.id,
                 Beacon.id.in_(joined),
@@ -478,6 +532,8 @@ def beacon_audience_ids(beacon):
 
 def join_beacon(user, beacon):
     if beacon.author_id == user.id or beacon.has_member(user):
+        return
+    if is_blocked_between(user.id, beacon.author_id):
         return
     db.session.add(BeaconMember(beacon_id=beacon.id, user_id=user.id))
     notify(beacon.author_id, "beacon_join", beacon_id=beacon.id, actor=user)
@@ -899,7 +955,9 @@ def register_routes(app):
     @app.route("/post/<int:post_id>")
     def view_post(post_id):
         post = get_visible_post(post_id)
-        return render_template("post.html", post=post, liked=liked_ids([post]))
+        return render_template(
+            "post.html", post=post, liked=liked_ids([post]), reasons=REPORT_REASONS,
+        )
 
     @app.route("/post/<int:post_id>/edit", methods=["GET", "POST"])
     @login_required
@@ -986,7 +1044,10 @@ def register_routes(app):
     @app.route("/u/<username>")
     def profile(username):
         user = find_user(username) or abort(404)
-        posts = newest_first(
+        i_blocked = g.user is not None and db.session.get(Block, (g.user.id, user.id)) is not None
+        if g.user is not None and not i_blocked and is_blocked_between(g.user.id, user.id):
+            abort(404)
+        posts = [] if i_blocked else newest_first(
             visible_posts_query(g.user).filter(Post.author_id == user.id)
         ).all()
         stats = {
@@ -997,7 +1058,8 @@ def register_routes(app):
             "following": Follow.query.filter_by(follower_id=user.id).count(),
         }
         return render_template(
-            "profile.html", user=user, posts=posts, stats=stats, liked=liked_ids(posts)
+            "profile.html", user=user, posts=posts, stats=stats, liked=liked_ids(posts),
+            i_blocked=i_blocked, reasons=REPORT_REASONS,
         )
 
     @app.route("/settings", methods=["GET", "POST"])
@@ -1037,6 +1099,8 @@ def register_routes(app):
     @login_required
     def follow(username):
         user = find_user(username) or abort(404)
+        if is_blocked_between(g.user.id, user.id):
+            abort(403)
         if user.id != g.user.id:
             existing = db.session.get(Follow, (g.user.id, user.id))
             if existing:
@@ -1052,6 +1116,8 @@ def register_routes(app):
     @login_required
     def toggle_circle(username):
         user = find_user(username) or abort(404)
+        if is_blocked_between(g.user.id, user.id):
+            abort(403)
         if user.id != g.user.id:
             existing = db.session.get(CircleMember, (g.user.id, user.id))
             if existing:
@@ -1062,6 +1128,80 @@ def register_routes(app):
                 flash(f"{user.username} теперь в близком круге.", "ok")
             db.session.commit()
         return redirect(request.referrer or url_for("profile", username=user.username))
+
+    # ---------- БЕЗОПАСНОСТЬ ----------
+
+    @app.route("/u/<username>/block", methods=["POST"])
+    @login_required
+    def toggle_block(username):
+        user = find_user(username) or abort(404)
+        if user.id == g.user.id:
+            abort(400, "Себя заблокировать нельзя.")
+        existing = db.session.get(Block, (g.user.id, user.id))
+        if existing:
+            db.session.delete(existing)
+            flash(f"{user.username} разблокирован(а).", "ok")
+        else:
+            block_user(g.user, user)
+            flash(f"{user.username} заблокирован(а): вы больше не видите друг друга и не можете писать.", "ok")
+        db.session.commit()
+        return redirect(url_for("profile", username=user.username))
+
+    @app.route("/report", methods=["POST"])
+    @login_required
+    def report():
+        reason = request.form.get("reason", "other")
+        if reason not in REPORT_REASONS:
+            reason = "other"
+        post_obj = beacon = None
+        if request.form.get("post_id"):
+            post_obj = get_visible_post(request.form.get("post_id", type=int))
+            target = post_obj.author
+        elif request.form.get("beacon_token"):
+            beacon = get_beacon(request.form["beacon_token"])
+            target = beacon.author
+        else:
+            target = find_user(request.form.get("username", "")) or abort(404)
+        if target.id == g.user.id:
+            abort(400, "На себя пожаловаться нельзя.")
+
+        db.session.add(Report(
+            reporter_id=g.user.id, target_user_id=target.id, reason=reason,
+            post_id=post_obj.id if post_obj else None, beacon_id=beacon.id if beacon else None,
+            comment=request.form.get("comment", "").strip()[:500],
+        ))
+        if request.form.get("also_block") and not db.session.get(Block, (g.user.id, target.id)):
+            block_user(g.user, target)
+        db.session.commit()
+        flash("Спасибо! Жалоба отправлена модераторам.", "ok")
+        if request.form.get("also_block"):
+            return redirect(url_for("feed"))
+        return redirect(request.referrer or url_for("feed"))
+
+    def is_admin(user):
+        admins = {
+            name.strip().lower()
+            for name in os.environ.get("NOWA_ADMINS", "").split(",") if name.strip()
+        }
+        return user is not None and user.username.lower() in admins
+
+    @app.route("/admin/reports", methods=["GET", "POST"])
+    @login_required
+    def admin_reports():
+        if not is_admin(g.user):
+            abort(404)
+        if request.method == "POST":
+            item = db.session.get(Report, request.form.get("report_id", type=int)) or abort(404)
+            action = request.form.get("action")
+            if action == "delete_post" and item.post:
+                db.session.delete(item.post)
+            elif action == "delete_beacon" and item.beacon:
+                db.session.delete(item.beacon)
+            item.resolved = True
+            db.session.commit()
+            return redirect(url_for("admin_reports"))
+        items = Report.query.filter_by(resolved=False).order_by(Report.id).limit(200).all()
+        return render_template("admin_reports.html", items=items, reasons=REPORT_REASONS)
 
     # ---------- УВЕДОМЛЕНИЯ ----------
 
@@ -1092,7 +1232,9 @@ def register_routes(app):
         if q:
             pattern = f"%{q}%"
             users = (
-                User.query.filter(User.username.ilike(pattern))
+                User.query.filter(
+                    User.username.ilike(pattern), User.id.not_in(blocked_ids(g.user))
+                )
                 .order_by(User.username).limit(20).all()
             )
             posts = newest_first(
@@ -1172,12 +1314,16 @@ def register_routes(app):
     def beacon_page(token):
         purge_expired_beacons()
         beacon = get_beacon(token)
+        if g.user is not None and is_blocked_between(g.user.id, beacon.author_id):
+            abort(404, "Этот маяк уже погас.")
         # Ссылка — это приглашение: открыть маяк может любой, у кого она есть.
         # Но место встречи и чат видят только участники.
         inside = g.user is not None and (
             beacon.author_id == g.user.id or beacon.has_member(g.user)
         )
-        return render_template("beacon.html", beacon=beacon, inside=inside)
+        return render_template(
+            "beacon.html", beacon=beacon, inside=inside, reasons=REPORT_REASONS,
+        )
 
     @app.route("/b/<token>/join", methods=["POST"])
     def join_beacon_route(token):
@@ -1187,6 +1333,8 @@ def register_routes(app):
             flash(f"Зарегистрируйся за 20 секунд — и сразу попадёшь в маяк {beacon.author.username}.", "ok")
             return redirect(url_for("register"))
 
+        if is_blocked_between(g.user.id, beacon.author_id):
+            abort(404, "Этот маяк уже погас.")
         member = db.session.get(BeaconMember, (beacon.id, g.user.id))
         if member:
             db.session.delete(member)
@@ -1273,7 +1421,10 @@ def register_routes(app):
                 Follow.follower_id == g.user.id
             )
             answers = (
-                Answer.query.filter(Answer.day == day, Answer.user_id.in_(following))
+                Answer.query.filter(
+                    Answer.day == day, Answer.user_id.in_(following),
+                    Answer.user_id.not_in(blocked_ids(g.user)),
+                )
                 .order_by(Answer.created_at.desc()).all()
             )
         return render_template(
@@ -1319,7 +1470,10 @@ def register_routes(app):
         if other.id == g.user.id:
             return redirect(url_for("messages"))
 
+        blocked = is_blocked_between(g.user.id, other.id)
         if request.method == "POST":
+            if blocked:
+                abort(403)
             text_value = request.form.get("text", "").strip()
             if text_value and len(text_value) <= MAX_MESSAGE_LENGTH:
                 timer = chat_timer(g.user, other)
@@ -1339,7 +1493,7 @@ def register_routes(app):
         history = chat_query(g.user, other).order_by(Message.id).all()
         mark_read(g.user, other)
         return render_template(
-            "chat.html", other=other, history=history,
+            "chat.html", other=other, history=history, blocked=blocked,
             timer=chat_timer(g.user, other), timers=CHAT_TIMERS,
         )
 
@@ -1350,6 +1504,8 @@ def register_routes(app):
         seconds = request.form.get("seconds", 0, type=int)
         if seconds not in CHAT_TIMERS or other.id == g.user.id:
             abort(400, "Такого таймера нет.")
+        if is_blocked_between(g.user.id, other.id):
+            abort(403)
 
         a, b = sorted((g.user.id, other.id))
         timer = db.session.get(ChatTimer, (a, b))

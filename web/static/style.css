@@ -490,3 +490,18 @@ body.offline::before {
 .pitch-grid .card { margin: 0; }
 .pitch-grid p { margin-top: 4px; }
 @media (max-width: 520px) { .pitch-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Безопасность ---------- */
+
+.safety { display: flex; justify-content: center; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-top: 14px; }
+#comments .safety { justify-content: space-between; }
+.report summary { cursor: pointer; list-style: none; }
+.report summary::-webkit-details-marker { display: none; }
+.report[open] { flex-basis: 100%; text-align: left; background: var(--bg); border-radius: 10px; padding: 12px; }
+.report form { margin-top: 8px; }
+.report label { margin: 4px 0; }
+.report input[name=comment] { margin: 6px 0 10px; }
+.chat-blocked { padding: 16px; text-align: center; border-top: 1px solid var(--line); }
+.report-item { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.report-item p { margin-bottom: 4px; }
+.report-item blockquote { border-left: 3px solid var(--line); padding-left: 10px; margin: 8px 0; white-space: pre-wrap; }

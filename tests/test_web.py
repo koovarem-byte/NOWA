@@ -619,3 +619,88 @@ def test_answer_streak(app):
         db.session.add(Answer(user_id=user.id, day=today(), text="x"))
         db.session.commit()
         assert answer_streak(user) == 4
+
+
+# ---------------- Безопасность ----------------
+
+def test_block_hides_everything_both_ways(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    make_friends_via_follow(artem, bob, "artem", "bob")
+    post(artem, "/u/bob/circle")
+    post(bob, "/post/new", text="пост Боба")
+    post(artem, "/post/new", text="пост Артёма")
+    light_beacon(artem, title="маяк Артёма")
+    token = beacon_token(app)
+    post(bob, f"/b/{token}/join")
+
+    post(artem, "/u/bob/block")
+
+    from app import BeaconMember, CircleMember, Follow
+    with app.app_context():
+        assert Follow.query.count() == 0 and CircleMember.query.count() == 0
+        assert BeaconMember.query.count() == 0
+
+    # Боб не видит Артёма нигде
+    assert "пост Артёма" not in bob.get("/feed?tab=all").get_data(as_text=True)
+    assert "маяк Артёма" not in bob.get("/feed").get_data(as_text=True)
+    assert bob.get("/u/artem").status_code == 404
+    assert bob.get(f"/b/{token}").status_code == 404
+    assert bob.get("/post/2").status_code == 404
+    assert "artem" not in bob.get("/search?q=art").get_data(as_text=True).split("Люди")[1].split("Посты")[0]
+    assert bob.post("/messages/artem", data={"text": "эй", "csrf": csrf_of(bob)}).status_code == 403
+    assert bob.post("/u/artem/follow", data={"csrf": csrf_of(bob)}).status_code == 403
+
+    # И Артём не видит Боба, но может разблокировать
+    assert "пост Боба" not in artem.get("/feed?tab=all").get_data(as_text=True)
+    page = artem.get("/u/bob").get_data(as_text=True)
+    assert "Разблокировать" in page and "пост Боба" not in page
+
+    post(artem, "/u/bob/block")
+    assert "пост Артёма" in bob.get("/feed?tab=all").get_data(as_text=True)
+
+
+def test_blocked_user_cannot_notify(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    post(artem, "/post/new", text="пост")
+    post(artem, "/u/bob/block")
+    assert bob.post("/post/1/like", data={"csrf": csrf_of(bob)}).status_code == 404
+    from app import Notification
+    with app.app_context():
+        assert Notification.query.count() == 0
+
+
+def test_report_and_moderation(app, monkeypatch):
+    monkeypatch.setenv("NOWA_ADMINS", "moder")
+    artem, bob, moder = app.test_client(), app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    register(moder, "moder")
+    post(bob, "/post/new", text="плохой пост")
+
+    page = post(artem, "/report", post_id="1", reason="abuse", comment="оскорбляет").get_data(as_text=True)
+    assert "Жалоба отправлена" in page
+
+    assert artem.get("/admin/reports").status_code == 404
+    page = moder.get("/admin/reports").get_data(as_text=True)
+    assert "Оскорбления" in page and "плохой пост" in page and "оскорбляет" in page
+
+    from app import Post, Report
+    with app.app_context():
+        report_id = Report.query.first().id
+    post(moder, "/admin/reports", report_id=str(report_id), action="delete_post")
+    with app.app_context():
+        assert db.session.get(Post, 1) is None
+        assert Report.query.filter_by(resolved=False).count() == 0
+
+
+def test_report_with_block(app):
+    artem, bob = app.test_client(), app.test_client()
+    register(artem, "artem")
+    register(bob, "bob")
+    post(artem, "/report", username="bob", reason="danger", also_block="1")
+    assert artem.get("/u/bob").get_data(as_text=True).count("Разблокировать") == 1
+    assert artem.post("/report", data={"username": "artem", "csrf": csrf_of(artem)}).status_code == 400

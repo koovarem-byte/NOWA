@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ user.username }} · NOWA{% endblock %}
 {% block content %}
-{% from "_macros.html" import avatar with context %}
+{% from "_macros.html" import avatar, report_form with context %}
 <section class="card profile">
     {{ avatar(user, 'big') }}
     <h2>{{ user.username }}</h2>
@@ -14,6 +14,12 @@
 
     {% if me and me.id == user.id %}
         <a class="btn ghost" href="{{ url_for('settings') }}">Настройки и близкий круг</a>
+    {% elif me and i_blocked %}
+        <p class="muted">Ты заблокировал(а) этого человека. Вы не видите друг друга и не можете писать.</p>
+        <form method="post" action="{{ url_for('toggle_block', username=user.username) }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="btn ghost">Разблокировать</button>
+        </form>
     {% elif me %}
         <div class="row center">
             <form method="post" action="{{ url_for('follow', username=user.username) }}">
@@ -29,6 +35,14 @@
                 <input type="hidden" name="csrf" value="{{ csrf }}">
                 <button class="btn ghost" title="Близкий круг видит твои закрытые посты">
                     {% if in_circle(me, user) %}🔒 В круге ✓{% else %}🔒 В близкий круг{% endif %}</button>
+            </form>
+        </div>
+        <div class="safety">
+            {{ report_form(reasons, username=user.username) }}
+            <form method="post" action="{{ url_for('toggle_block', username=user.username) }}"
+                  onsubmit="return confirm('Заблокировать {{ user.username }}? Подписки разорвутся, писать друг другу будет нельзя.')">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="link muted">⛔ Заблокировать</button>
             </form>
         </div>
     {% endif %}

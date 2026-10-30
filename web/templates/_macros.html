@@ -17,3 +17,21 @@
         <img class="photo" src="{{ src }}" width="{{ image.width }}" height="{{ image.height }}" alt="" loading="lazy">
     {%- endif -%}
 {%- endmacro %}
+
+{% macro report_form(reasons, label='⚑ Пожаловаться', post_id=None, beacon_token=None, username=None) -%}
+<details class="report">
+    <summary class="muted">{{ label }}</summary>
+    <form method="post" action="{{ url_for('report') }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {% if post_id %}<input type="hidden" name="post_id" value="{{ post_id }}">{% endif %}
+        {% if beacon_token %}<input type="hidden" name="beacon_token" value="{{ beacon_token }}">{% endif %}
+        {% if username %}<input type="hidden" name="username" value="{{ username }}">{% endif %}
+        {% for key, text in reasons.items() %}
+            <label class="muted"><input type="radio" name="reason" value="{{ key }}" {% if loop.first %}checked{% endif %}> {{ text }}</label>
+        {% endfor %}
+        <input name="comment" maxlength="500" placeholder="Подробности, по желанию">
+        <label class="muted"><input type="checkbox" name="also_block" value="1"> И заблокировать автора</label>
+        <button class="btn danger">Отправить жалобу</button>
+    </form>
+</details>
+{%- endmacro %}

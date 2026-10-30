@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Пост {{ post.author.username }} · NOWA{% endblock %}
 {% block content %}
-{% from "_macros.html" import avatar with context %}
+{% from "_macros.html" import avatar, report_form with context %}
 {% include "_post.html" %}
 
 <section class="card" id="comments">
@@ -29,7 +29,10 @@
             <button class="btn">➤</button>
         </form>
         {% if me.id != post.author_id %}
-            <a class="muted" href="{{ url_for('chat', username=post.author.username) }}">✉️ Ответить автору в личку</a>
+            <div class="safety">
+                <a class="muted" href="{{ url_for('chat', username=post.author.username) }}">✉️ Ответить автору в личку</a>
+                {{ report_form(reasons, post_id=post.id) }}
+            </div>
         {% endif %}
     {% else %}
         <p class="muted"><a href="{{ url_for('login', next=request.path) }}">Войди</a>, чтобы комментировать.</p>

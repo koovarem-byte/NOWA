@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Жалобы · NOWA{% endblock %}
+{% block content %}
+<section class="card">
+    <h3>⚑ Жалобы ({{ items|length }})</h3>
+    {% for item in items %}
+        <div class="report-item">
+            <p><b>{{ reasons.get(item.reason, item.reason) }}</b> · <span class="muted">{{ item.created_at|ago }}</span></p>
+            <p class="muted">
+                От <a href="{{ url_for('profile', username=item.reporter.username) }}">{{ item.reporter.username }}</a>
+                на <a href="{{ url_for('profile', username=item.target.username) }}">{{ item.target.username }}</a>
+            </p>
+            {% if item.comment %}<p>«{{ item.comment }}»</p>{% endif %}
+            {% if item.post %}<blockquote>{{ item.post.text|truncate(300) }}</blockquote>{% endif %}
+            {% if item.beacon %}<blockquote>Маяк: {{ item.beacon.emoji }} {{ item.beacon.label }}{% if item.beacon.place %} · 📍 {{ item.beacon.place }}{% endif %}</blockquote>{% endif %}
+            <form method="post" class="row">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <input type="hidden" name="report_id" value="{{ item.id }}">
+                {% if item.post %}<button class="btn danger" name="action" value="delete_post">Удалить пост</button>{% endif %}
+                {% if item.beacon %}<button class="btn danger" name="action" value="delete_beacon">Погасить маяк</button>{% endif %}
+                <button class="btn ghost" name="action" value="dismiss">Закрыть жалобу</button>
+            </form>
+        </div>
+    {% else %}
+        <p class="muted">Новых жалоб нет 🎉</p>
+    {% endfor %}
+</section>
+{% endblock %}
